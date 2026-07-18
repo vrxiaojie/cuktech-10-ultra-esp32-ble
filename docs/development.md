@@ -159,3 +159,19 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - 真机 Broker 连接、LWT、retain、断线重连和完整快照：当前未发现串口，尚未完成
 
 详细契约和证据等级见 [MQTT 状态桥接](mqtt-bridge.md)。
+
+## 阶段 10 验证
+
+- 上游基线：`kairui1108/cuktech-ble-ha@89e5f78387812323528f5967421f65a689e803ef`
+- `idf.py build`：通过，ESP-IDF 5.5.2，目标 `esp32c3`
+- 固件镜像：`0xfa1b0`，默认 1 MiB app 分区剩余 `0x5e50`（约 2%），未修改分区表
+- 主机测试：10/10 通过；ASan/UBSan 10/10 通过，受控环境不支持 LeakSanitizer，关闭 leak 检测
+- MQTT 控制：订阅 `<prefix>/set` 与 `<prefix>/port`，拒绝分片、超长、非法 JSON、错误类型和范围外值
+- 命令串行化：MQTT/HTTP 只投递 8 项有界队列；BLE task 独占 GATT、会话计数器和 GET/SET 顺序
+- 端口控制：源码确认 PIID16 的 C1/C2/C3/A 为 bit0/bit1/bit2/bit3；测试覆盖四个端口和 all 的开关位图
+- 原子读改写：端口命令在 BLE task 内 GET PIID16、RMW、必要时 SET；PIID21 接收完整 32 位值
+- `/api/enable`：持久化 `ble_enabled`，运行时启停失败时回滚配置；禁用会中断长等待并清理连接/会话/端口状态
+- Secret：控制日志只记录 request ID、PIID、数值或端口动作，不打印 Token、BLE Key、密码、会话密钥或认证帧
+- 真机 MQTT 控制、PIID 写入、端口开关、运行时启停和 HA 联动：当前未发现串口，尚未完成
+
+详细调用链和证据等级见 [Home Assistant 控制](ha-control.md)。
