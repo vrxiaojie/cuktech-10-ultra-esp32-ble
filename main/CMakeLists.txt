@@ -5,6 +5,7 @@ idf_component_register(
     INCLUDE_DIRS
         "."
     REQUIRES
+        app_config
         bt
         esp_app_format
         esp_http_server
