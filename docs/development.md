@@ -51,3 +51,18 @@ cmake -S tests/host -B /tmp/cuktech-host-tests -DCMAKE_BUILD_TYPE=Debug
 cmake --build /tmp/cuktech-host-tests
 ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 ```
+
+## 阶段 03 验证
+
+- `idf.py build`：通过
+- SoftAP 名称：`CUKTECH-BLE-<STA MAC 后四位>`
+- SoftAP 默认安全：WPA2-PSK，默认密码 `cuktech10`，可通过 Kconfig 修改
+- 首次启动：无 Wi-Fi 配置时进入 `provisioning_ap`
+- 正常启动：有 Wi-Fi 配置时进入 `sta_connecting`，约 60 秒未获得 IP 后进入 `fallback_ap`
+- 配网写入：APSTA 获得 IP 后才提交 NVS；超时、无效输入或保存失败时恢复旧配置
+- HTTP：请求体上限 256 字节；非法 JSON、缺字段和并发请求返回明确错误
+- Secret：Wi-Fi 密码不进入日志，HTTP 和 cJSON 临时缓冲在使用后显式清零
+- 固件镜像：约 847 KiB，默认 1 MiB 应用分区剩余约 17%
+- 真机 SoftAP、DHCP、HTTP、APSTA 验证、重启和 60 秒回退：待串口设备可见后验证
+
+本阶段未加入 mDNS。ESP-IDF 5.5.2 源码树不含高层 `mdns` 组件；若采用 Espressif Component Registry 的托管组件，需要先评估依赖、许可证和固件成本。

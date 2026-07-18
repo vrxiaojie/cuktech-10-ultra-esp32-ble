@@ -1,0 +1,20 @@
+menu "CUKTECH BLE gateway"
+
+    config CUKTECH_PROVISION_AP_PASSWORD
+        string "Provisioning SoftAP password"
+        default "cuktech10"
+        help
+            WPA2 password for the Wi-Fi-only provisioning SoftAP. Use 8 to 63
+            characters. An empty value creates an open AP and is not recommended.
+
+    config CUKTECH_WIFI_FALLBACK_SECONDS
+        int "STA failure time before enabling fallback SoftAP"
+        range 15 600
+        default 60
+
+    config CUKTECH_WIFI_VERIFY_SECONDS
+        int "Provisioning credential verification timeout"
+        range 10 120
+        default 30
+
+endmenu
