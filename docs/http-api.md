@@ -37,9 +37,12 @@ HTTP 管理页没有 TLS 或登录认证，只适用于可信局域网。首次�
   "gateway_firmware_version": "...",
   "wifi_state": "sta_connected",
   "ble_state": "authenticated",
+  "mqtt_state": "connected",
   "ble_gatt_ready": true,
   "ble_mtu": 247,
   "ble_notify_dropped": 0,
+  "mqtt_reconnects": 1,
+  "mqtt_publish_failures": 0,
   "last_error": "",
   "free_heap": 123456,
   "state_revision": 20
@@ -47,6 +50,8 @@ HTTP 管理页没有 TLS 或登录认证，只适用于可信局域网。首次�
 ```
 
 `connected` 和 `authenticated` 表示 BLE/MiOT 登录状态，不表示 Wi-Fi 状态。认证进行中 `connected=true`、`authenticated=false`；只有设备 HMAC 校验和认证控制成功结果均通过后，`authenticated` 才为 `true`。`ble_state` 可能为 `scanning`、`connecting`、`authenticating`、`authenticated`、`auth_failed_locked` 或错误/退避状态。
+
+`mqtt_connected` 和 `mqtt_state` 来自 MQTT Client 实际状态。`mqtt_state` 可能为 `waiting_config`、`connecting`、`connected`、`disconnected` 或 `error`；Broker 不可达不会触发 Wi-Fi 配网回退，也不会停止 BLE 数据采集。
 
 `firmware_version` 是从充电器 GATT 特征读取的版本；`gateway_firmware_version` 是 ESP32 固件版本。读取失败时充电器型号或版本为空字符串，但字段仍保留。`settings` 使用字符串 PIID 键；`ports` 只包含稳定遥测字段。意外断线会保留最后端口和设置快照，同时把连接状态置为 false。
 
