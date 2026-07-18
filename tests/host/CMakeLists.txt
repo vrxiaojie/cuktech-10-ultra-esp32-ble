@@ -36,3 +36,21 @@ if(IDF_PATH AND EXISTS "${IDF_PATH}/components/json/cJSON/cJSON.c")
     target_compile_options(web_config_tests PRIVATE -Wall -Wextra -Werror)
     add_test(NAME web_config_tests COMMAND web_config_tests)
 endif()
+
+if(EXISTS "/usr/include/openssl/evp.h")
+    add_executable(protocol_tests
+        test_protocol.c
+        crypto_openssl.c
+        ../../components/cuktech_protocol/cuktech_protocol.c
+        ../../components/cuktech_protocol/miot_tlv.c
+        ../../components/cuktech_protocol/port_decode.c
+    )
+    target_include_directories(protocol_tests PRIVATE
+        ../../components/cuktech_protocol/include
+        ../../components/cuktech_protocol
+    )
+    target_compile_features(protocol_tests PRIVATE c_std_17)
+    target_compile_options(protocol_tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(protocol_tests PRIVATE crypto)
+    add_test(NAME protocol_tests COMMAND protocol_tests)
+endif()
