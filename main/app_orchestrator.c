@@ -8,6 +8,7 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "mqtt_bridge.h"
 #include "web_config.h"
 #include "wifi_manager.h"
 
@@ -61,6 +62,10 @@ void app_orchestrator_start(void)
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "provisioning HTTP server start failed: %s", esp_err_to_name(error));
         return;
+    }
+    error = mqtt_bridge_start(&config);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "MQTT bridge start failed: %s", esp_err_to_name(error));
     }
     error = cuktech_ble_start(&config);
     if (error != ESP_OK) {
