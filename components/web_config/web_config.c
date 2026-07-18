@@ -5,6 +5,7 @@
 
 #include "app_config.h"
 #include "cJSON.h"
+#include "cuktech_ble.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
@@ -222,15 +223,22 @@ static esp_err_t provision_handler(httpd_req_t *request)
 static esp_err_t status_handler(httpd_req_t *request)
 {
     const esp_app_desc_t *app = esp_app_get_description();
+    cuktech_ble_status_t ble_status;
+    cuktech_ble_get_status(&ble_status);
     char response[512];
     int written = snprintf(
         response, sizeof(response),
-        "{\"connected\":false,\"authenticated\":false,\"mqtt_connected\":false,"
+        "{\"connected\":%s,\"authenticated\":false,\"mqtt_connected\":false,"
         "\"device_model\":\"\",\"firmware_version\":\"%s\",\"ports\":{},"
         "\"settings\":{},\"protocol_extend\":0,\"protocol_switches\":{},"
-        "\"wifi_state\":\"%s\",\"ble_state\":\"not_started\","
-        "\"last_error\":\"\",\"free_heap\":%lu}",
-        app->version, wifi_manager_state_name(wifi_manager_get_state()),
+        "\"wifi_state\":\"%s\",\"ble_state\":\"%s\",\"ble_gatt_ready\":%s,"
+        "\"ble_mtu\":%u,\"ble_notify_dropped\":%lu,"
+        "\"last_error\":\"%s\",\"free_heap\":%lu}",
+        ble_status.connected ? "true" : "false", app->version,
+        wifi_manager_state_name(wifi_manager_get_state()),
+        cuktech_ble_state_name(ble_status.state),
+        ble_status.gatt_ready ? "true" : "false", ble_status.mtu,
+        (unsigned long)ble_status.notifications_dropped, ble_status.last_error,
         (unsigned long)esp_get_free_heap_size());
     if (written < 0 || (size_t)written >= sizeof(response)) {
         return send_json(request, "500 Internal Server Error",
