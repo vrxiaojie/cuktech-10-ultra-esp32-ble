@@ -32,4 +32,4 @@
 
 ### 升级提示
 
-同一分区布局可直接重新烧录并保留 NVS。任何未来 schema 或分区变更必须提供迁移、回滚和数据影响说明。完整操作见 [部署与烧录](docs/deployment.md)，真机步骤见 [验收记录](docs/hardware-validation.md)。
+同一分区布局可直接重新烧录并保留 NVS。任何未来 schema 或分区变更必须提供迁移、回滚和数据影响说明。完整操作和真机步骤见 [部署与烧录](docs/deployment.md)。
