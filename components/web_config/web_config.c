@@ -3,13 +3,16 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "app_config.h"
 #include "cJSON.h"
+#include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "web_config_model.h"
 #include "wifi_manager.h"
 
 #define WEB_CONFIG_MAX_BODY_SIZE 256U
@@ -42,6 +45,46 @@ static const char PROVISION_PAGE[] =
     "msg.textContent=j.ok?'连接成功，IP：'+j.ip+'。设备将在 3 秒后重启。':'失败：'+j.error;"
     "}catch(x){msg.textContent='请求失败，请重新连接配网热点后重试。'}};</script></body></html>";
 
+static const char MANAGEMENT_PAGE[] =
+    "<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'>"
+    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+    "<title>CUKTECH BLE 网关</title><style>body{font-family:sans-serif;max-width:42rem;"
+    "margin:2rem auto;padding:0 1rem}label{display:block;margin-top:.8rem}input,button{"
+    "box-sizing:border-box;width:100%;padding:.6rem;margin-top:.25rem}.row{display:grid;"
+    "grid-template-columns:1fr 1fr;gap:.8rem}.check{display:flex;gap:.5rem}.check input{width:auto}"
+    "code{word-break:break-all}</style></head><body><h1>CUKTECH BLE 网关</h1>"
+    "<p>当前页面使用局域网 HTTP，不提供 TLS；只应在可信网络中使用。</p>"
+    "<p id='status'>正在读取状态…</p><form id='f'><label>充电器 MAC<input id='mac' maxlength='17'></label>"
+    "<label>米家 Token（24 位十六进制，留空保持）<input id='token' type='password' maxlength='24'></label>"
+    "<label class='check'><input id='ct' type='checkbox'>清除 Token</label>"
+    "<label>BLE Key（可选/预留，32 位十六进制，留空保持）<input id='key' type='password' maxlength='32'></label>"
+    "<label class='check'><input id='ck' type='checkbox'>清除 BLE Key</label>"
+    "<div class='row'><label>MQTT Host<input id='mh' maxlength='128'></label>"
+    "<label>MQTT Port<input id='mp' type='number' min='1' max='65535'></label></div>"
+    "<label>MQTT Username<input id='mu' maxlength='64'></label>"
+    "<label>MQTT Password（留空保持）<input id='mw' type='password' maxlength='64'></label>"
+    "<label class='check'><input id='cm' type='checkbox'>清除 MQTT Password</label>"
+    "<label>MQTT Topic Prefix<input id='mt' maxlength='128'></label>"
+    "<p>默认 <code>cuktech/charger</code> 才能直接兼容未经修改的现有 HA 集成。</p>"
+    "<div class='row'><label>Keepalive<input id='mk' type='number' min='1' max='65535'></label>"
+    "<label class='check'><input id='be' type='checkbox'>启用 BLE</label></div>"
+    "<button>校验、保存并重启</button></form><p id='msg'></p><script>"
+    "async function load(){let [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),"
+    "fetch('/api/config').then(r=>r.json())]);status.textContent='Wi-Fi: '+s.wifi_state+"
+    "'；BLE: '+s.ble_state;mac.value=c.charger_mac;mh.value=c.mqtt_host;mp.value=c.mqtt_port;"
+    "mu.value=c.mqtt_username;mt.value=c.mqtt_topic_prefix;mk.value=c.mqtt_keepalive;"
+    "be.checked=c.ble_enabled;msg.textContent='Token: '+(c.token_configured?'已配置':'未配置')+"
+    "'；BLE Key: '+(c.ble_key_configured?'已配置':'未配置')+'；MQTT 密码: '+"
+    "(c.mqtt_password_configured?'已配置':'未配置');}"
+    "f.onsubmit=async(e)=>{e.preventDefault();let b={charger_mac:mac.value,token:token.value,"
+    "clear_token:ct.checked,ble_key:key.value,clear_ble_key:ck.checked,mqtt_host:mh.value,"
+    "mqtt_port:Number(mp.value),mqtt_username:mu.value,mqtt_password:mw.value,"
+    "clear_mqtt_password:cm.checked,mqtt_topic_prefix:mt.value,mqtt_keepalive:Number(mk.value),"
+    "ble_enabled:be.checked};let r=await fetch('/api/config',{method:'POST',headers:{"
+    "'Content-Type':'application/json'},body:JSON.stringify(b)});let j=await r.json();"
+    "msg.textContent=j.ok?'保存成功，设备将在 3 秒后重启。':'失败：'+j.error;};load();"
+    "</script></body></html>";
+
 static esp_err_t set_security_headers(httpd_req_t *request)
 {
     ESP_RETURN_ON_ERROR(httpd_resp_set_hdr(request, "Cache-Control", "no-store"), TAG,
@@ -56,7 +99,10 @@ static esp_err_t root_handler(httpd_req_t *request)
 {
     set_security_headers(request);
     httpd_resp_set_type(request, "text/html; charset=utf-8");
-    return httpd_resp_send(request, PROVISION_PAGE, HTTPD_RESP_USE_STRLEN);
+    const char *page = wifi_manager_get_state() == WIFI_MANAGER_STATE_STA_CONNECTED
+                           ? MANAGEMENT_PAGE
+                           : PROVISION_PAGE;
+    return httpd_resp_send(request, page, HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t send_json(httpd_req_t *request, const char *status,
@@ -91,6 +137,18 @@ static void restart_task(void *argument)
     (void)argument;
     vTaskDelay(pdMS_TO_TICKS(3000));
     esp_restart();
+}
+
+static void schedule_restart(void)
+{
+    if (xTaskCreate(restart_task, "config_restart", 2048, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "failed to schedule configuration restart");
+    }
+}
+
+static bool management_allowed(void)
+{
+    return wifi_manager_get_state() == WIFI_MANAGER_STATE_STA_CONNECTED;
 }
 
 static const char *provision_error_name(wifi_manager_provision_result_t result)
@@ -157,10 +215,90 @@ static esp_err_t provision_handler(httpd_req_t *request)
     char response[80];
     snprintf(response, sizeof(response), "{\"ok\":true,\"ip\":\"%s\"}", ip_address);
     esp_err_t error = send_json(request, "200 OK", response);
-    if (xTaskCreate(restart_task, "provision_restart", 2048, NULL, 5, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "failed to schedule restart after provisioning");
-    }
+    schedule_restart();
     return error;
+}
+
+static esp_err_t status_handler(httpd_req_t *request)
+{
+    const esp_app_desc_t *app = esp_app_get_description();
+    char response[512];
+    int written = snprintf(
+        response, sizeof(response),
+        "{\"connected\":false,\"authenticated\":false,\"mqtt_connected\":false,"
+        "\"device_model\":\"\",\"firmware_version\":\"%s\",\"ports\":{},"
+        "\"settings\":{},\"protocol_extend\":0,\"protocol_switches\":{},"
+        "\"wifi_state\":\"%s\",\"ble_state\":\"not_started\","
+        "\"last_error\":\"\",\"free_heap\":%lu}",
+        app->version, wifi_manager_state_name(wifi_manager_get_state()),
+        (unsigned long)esp_get_free_heap_size());
+    if (written < 0 || (size_t)written >= sizeof(response)) {
+        return send_json(request, "500 Internal Server Error",
+                         "{\"error\":\"status_too_large\"}");
+    }
+    return send_json(request, "200 OK", response);
+}
+
+static esp_err_t config_get_handler(httpd_req_t *request)
+{
+    if (!management_allowed()) {
+        return send_json(request, "403 Forbidden", "{\"error\":\"sta_required\"}");
+    }
+    app_config_t config;
+    bool found = false;
+    esp_err_t error = app_config_load(&config, &found);
+    if (error != ESP_OK) {
+        return send_json(request, "500 Internal Server Error",
+                         "{\"error\":\"config_load_failed\"}");
+    }
+    (void)found;
+    char response[WEB_CONFIG_PUBLIC_JSON_SIZE];
+    if (web_config_build_public_json(&config, response, sizeof(response)) !=
+        WEB_CONFIG_MODEL_OK) {
+        return send_json(request, "500 Internal Server Error",
+                         "{\"error\":\"config_render_failed\"}");
+    }
+    return send_json(request, "200 OK", response);
+}
+
+static esp_err_t config_post_handler(httpd_req_t *request)
+{
+    if (!management_allowed()) {
+        return send_json(request, "403 Forbidden", "{\"error\":\"sta_required\"}");
+    }
+    char body[WEB_CONFIG_API_MAX_BODY_SIZE + 1U] = {0};
+    if (receive_body(request, body, sizeof(body)) != ESP_OK) {
+        secure_zero(body, sizeof(body));
+        return send_json(request, "413 Payload Too Large",
+                         "{\"ok\":false,\"error\":\"body_too_large\"}");
+    }
+
+    app_config_t config;
+    bool found = false;
+    esp_err_t error = app_config_load(&config, &found);
+    if (error != ESP_OK) {
+        secure_zero(body, sizeof(body));
+        return send_json(request, "500 Internal Server Error",
+                         "{\"ok\":false,\"error\":\"config_load_failed\"}");
+    }
+    (void)found;
+    web_config_model_status_t status =
+        web_config_apply_json(body, request->content_len, &config);
+    secure_zero(body, sizeof(body));
+    if (status != WEB_CONFIG_MODEL_OK) {
+        char response[96];
+        snprintf(response, sizeof(response), "{\"ok\":false,\"error\":\"%s\"}",
+                 web_config_model_status_name(status));
+        return send_json(request, "400 Bad Request", response);
+    }
+    error = app_config_save(&config);
+    if (error != ESP_OK) {
+        return send_json(request, "500 Internal Server Error",
+                         "{\"ok\":false,\"error\":\"config_save_failed\"}");
+    }
+    esp_err_t response_error = send_json(request, "200 OK", "{\"ok\":true}");
+    schedule_restart();
+    return response_error;
 }
 
 static esp_err_t captive_redirect_handler(httpd_req_t *request)
@@ -190,6 +328,12 @@ esp_err_t web_config_start(void)
     const httpd_uri_t hotspot = {.uri = "/hotspot-detect.html",
                                  .method = HTTP_GET,
                                  .handler = captive_redirect_handler};
+    const httpd_uri_t status = {
+        .uri = "/api/status", .method = HTTP_GET, .handler = status_handler};
+    const httpd_uri_t config_get = {
+        .uri = "/api/config", .method = HTTP_GET, .handler = config_get_handler};
+    const httpd_uri_t config_post = {
+        .uri = "/api/config", .method = HTTP_POST, .handler = config_post_handler};
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &root), TAG,
                         "register root failed");
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &provision), TAG,
@@ -198,6 +342,12 @@ esp_err_t web_config_start(void)
                         "register captive path failed");
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &hotspot), TAG,
                         "register captive path failed");
-    ESP_LOGI(TAG, "provisioning HTTP server started");
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &status), TAG,
+                        "register status failed");
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &config_get), TAG,
+                        "register config GET failed");
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &config_post), TAG,
+                        "register config POST failed");
+    ESP_LOGI(TAG, "HTTP configuration server started");
     return ESP_OK;
 }
