@@ -228,13 +228,14 @@ static esp_err_t status_handler(httpd_req_t *request)
     char response[512];
     int written = snprintf(
         response, sizeof(response),
-        "{\"connected\":%s,\"authenticated\":false,\"mqtt_connected\":false,"
+        "{\"connected\":%s,\"authenticated\":%s,\"mqtt_connected\":false,"
         "\"device_model\":\"\",\"firmware_version\":\"%s\",\"ports\":{},"
         "\"settings\":{},\"protocol_extend\":0,\"protocol_switches\":{},"
         "\"wifi_state\":\"%s\",\"ble_state\":\"%s\",\"ble_gatt_ready\":%s,"
         "\"ble_mtu\":%u,\"ble_notify_dropped\":%lu,"
         "\"last_error\":\"%s\",\"free_heap\":%lu}",
-        ble_status.connected ? "true" : "false", app->version,
+        ble_status.connected ? "true" : "false",
+        ble_status.authenticated ? "true" : "false", app->version,
         wifi_manager_state_name(wifi_manager_get_state()),
         cuktech_ble_state_name(ble_status.state),
         ble_status.gatt_ready ? "true" : "false", ble_status.mtu,

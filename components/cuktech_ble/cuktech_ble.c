@@ -7,7 +7,10 @@
 #include <string.h>
 
 #include "cuktech_ble_core.h"
+#include "cuktech_miot_auth.h"
+#include "cuktech_protocol.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -32,6 +35,9 @@
 #define BLE_RETRY_MAX_SECONDS 300U
 #define BLE_APP_TASK_STACK_SIZE 6144U
 #define BLE_APP_TASK_PRIORITY 5U
+#define BLE_PENDING_NOTIFY_DEPTH 8U
+#define BLE_AUTH_FAILURE_LOCK_COUNT 5U
+#define BLE_AUTH_MIN_RETRY_SECONDS 3U
 
 typedef enum {
     CONTROL_EVENT_HOST_SYNC = 0,
@@ -137,6 +143,11 @@ static TaskHandle_t s_ble_task;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static cuktech_ble_status_t s_status = {.state = CUKTECH_BLE_STATE_NOT_STARTED};
 static ble_addr_t s_target_address;
+static uint8_t s_token[CUKTECH_TOKEN_SIZE];
+static cuktech_session_t s_session;
+static miot_characteristic_t s_miot_characteristics[MIOT_CHAR_COUNT];
+static notify_event_t s_pending_notifications[BLE_PENDING_NOTIFY_DEPTH];
+static size_t s_pending_notification_count;
 static uint8_t s_own_address_type;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static volatile bool s_control_overflow;
@@ -214,6 +225,12 @@ const char *cuktech_ble_state_name(cuktech_ble_state_t state)
         return "subscribing";
     case CUKTECH_BLE_STATE_READY:
         return "ready";
+    case CUKTECH_BLE_STATE_AUTHENTICATING:
+        return "authenticating";
+    case CUKTECH_BLE_STATE_AUTHENTICATED:
+        return "authenticated";
+    case CUKTECH_BLE_STATE_AUTH_FAILED_LOCKED:
+        return "auth_failed_locked";
     case CUKTECH_BLE_STATE_DISCONNECTING:
         return "disconnecting";
     case CUKTECH_BLE_STATE_BACKOFF:
@@ -234,12 +251,29 @@ static void update_status(cuktech_ble_state_t state, bool connected,
     s_status.state = state;
     s_status.connected = connected;
     s_status.gatt_ready = gatt_ready;
+    if (!connected) {
+        s_status.authenticated = false;
+    }
     if (mtu != 0U) {
         s_status.mtu = mtu;
     }
     s_status.retry_delay_seconds = retry_delay_seconds;
     if (last_error != NULL) {
         snprintf(s_status.last_error, sizeof(s_status.last_error), "%s", last_error);
+    }
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void update_authentication_status(bool authenticated,
+                                         uint32_t failure_count,
+                                         const char *last_error)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_status.authenticated = authenticated;
+    s_status.authentication_failures = failure_count;
+    if (last_error != NULL) {
+        snprintf(s_status.last_error, sizeof(s_status.last_error), "%s",
+                 last_error);
     }
     portEXIT_CRITICAL(&s_lock);
 }
@@ -471,12 +505,46 @@ static void drain_notifications(void)
     }
 }
 
+static void record_notification_received(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    ++s_status.notifications_received;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static bool pending_notification_take(uint16_t attr_handle,
+                                      notify_event_t *notification)
+{
+    for (size_t index = 0U; index < s_pending_notification_count; ++index) {
+        if (s_pending_notifications[index].attr_handle == attr_handle) {
+            *notification = s_pending_notifications[index];
+            if (index + 1U < s_pending_notification_count) {
+                memmove(&s_pending_notifications[index],
+                        &s_pending_notifications[index + 1U],
+                        (s_pending_notification_count - index - 1U) *
+                            sizeof(s_pending_notifications[0]));
+            }
+            --s_pending_notification_count;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void pending_notification_store(const notify_event_t *notification)
+{
+    if (s_pending_notification_count < BLE_PENDING_NOTIFY_DEPTH) {
+        s_pending_notifications[s_pending_notification_count++] = *notification;
+    } else {
+        record_notification_drop();
+    }
+}
+
 static bool wait_control_event(control_event_t *event, uint32_t timeout_ms)
 {
     TickType_t started = xTaskGetTickCount();
     TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
     for (;;) {
-        drain_notifications();
         if (s_control_overflow) {
             s_control_overflow = false;
             set_last_error_code("control_queue_overflow", 0);
@@ -499,9 +567,189 @@ static void discard_queued_events(void)
     while (s_control_queue != NULL &&
            xQueueReceive(s_control_queue, &control, 0) == pdTRUE) {
     }
+    s_pending_notification_count = 0U;
     drain_notifications();
     s_control_overflow = false;
     ulTaskNotifyTake(pdTRUE, 0);
+}
+
+static uint16_t auth_channel_handle(cuktech_miot_auth_channel_t channel)
+{
+    return channel == CUKTECH_MIOT_AUTH_CHANNEL_CONTROL
+               ? s_miot_characteristics[MIOT_CHAR_AUTH_CONTROL].value_handle
+               : s_miot_characteristics[MIOT_CHAR_AUTH_DATA].value_handle;
+}
+
+static cuktech_miot_auth_io_status_t auth_transport_write(
+    void *context, cuktech_miot_auth_channel_t channel, const uint8_t *data,
+    size_t data_len)
+{
+    (void)context;
+    uint16_t handle = auth_channel_handle(channel);
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return CUKTECH_MIOT_AUTH_IO_DISCONNECTED;
+    }
+    if (handle == 0U || data == NULL || data_len == 0U ||
+        data_len > UINT16_MAX) {
+        return CUKTECH_MIOT_AUTH_IO_ERROR;
+    }
+    int rc = ble_gattc_write_no_rsp_flat(s_conn_handle, handle, data,
+                                         (uint16_t)data_len);
+    if (rc == BLE_HS_ENOTCONN) {
+        return CUKTECH_MIOT_AUTH_IO_DISCONNECTED;
+    }
+    return rc == 0 ? CUKTECH_MIOT_AUTH_IO_OK
+                   : CUKTECH_MIOT_AUTH_IO_ERROR;
+}
+
+static cuktech_miot_auth_io_status_t auth_transport_receive(
+    void *context, cuktech_miot_auth_channel_t channel, uint8_t *data,
+    size_t data_capacity, size_t *data_len, uint32_t timeout_ms)
+{
+    (void)context;
+    if (data == NULL || data_len == NULL) {
+        return CUKTECH_MIOT_AUTH_IO_ERROR;
+    }
+    uint16_t expected_handle = auth_channel_handle(channel);
+    if (expected_handle == 0U) {
+        return CUKTECH_MIOT_AUTH_IO_ERROR;
+    }
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        notify_event_t notification;
+        if (pending_notification_take(expected_handle, &notification)) {
+            if (notification.length > data_capacity) {
+                return CUKTECH_MIOT_AUTH_IO_ERROR;
+            }
+            memcpy(data, notification.data, notification.length);
+            *data_len = notification.length;
+            return CUKTECH_MIOT_AUTH_IO_OK;
+        }
+        while (xQueueReceive(s_notify_queue, &notification, 0) == pdTRUE) {
+            record_notification_received();
+            if (notification.conn_handle != s_conn_handle) {
+                continue;
+            }
+            if (notification.attr_handle == expected_handle) {
+                if (notification.length > data_capacity) {
+                    return CUKTECH_MIOT_AUTH_IO_ERROR;
+                }
+                memcpy(data, notification.data, notification.length);
+                *data_len = notification.length;
+                return CUKTECH_MIOT_AUTH_IO_OK;
+            }
+            pending_notification_store(&notification);
+        }
+        control_event_t control;
+        while (xQueueReceive(s_control_queue, &control, 0) == pdTRUE) {
+            if (control.type == CONTROL_EVENT_DISCONNECTED) {
+                s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
+                              "peer_disconnected");
+                return CUKTECH_MIOT_AUTH_IO_DISCONNECTED;
+            }
+            if (control.type == CONTROL_EVENT_HOST_RESET) {
+                s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                set_last_error_code("host_reset", control.status);
+                update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
+                              NULL);
+                return CUKTECH_MIOT_AUTH_IO_DISCONNECTED;
+            }
+        }
+        if (s_control_overflow) {
+            s_control_overflow = false;
+            return CUKTECH_MIOT_AUTH_IO_ERROR;
+        }
+        TickType_t elapsed = xTaskGetTickCount() - started;
+        if (elapsed >= timeout) {
+            return CUKTECH_MIOT_AUTH_IO_TIMEOUT;
+        }
+        ulTaskNotifyTake(pdTRUE, timeout - elapsed);
+    }
+}
+
+static void auth_transport_discard(void *context,
+                                   cuktech_miot_auth_channel_t channel)
+{
+    (void)context;
+    uint16_t target_handle = auth_channel_handle(channel);
+    for (size_t index = 0U; index < s_pending_notification_count;) {
+        if (s_pending_notifications[index].attr_handle == target_handle) {
+            if (index + 1U < s_pending_notification_count) {
+                memmove(&s_pending_notifications[index],
+                        &s_pending_notifications[index + 1U],
+                        (s_pending_notification_count - index - 1U) *
+                            sizeof(s_pending_notifications[0]));
+            }
+            --s_pending_notification_count;
+        } else {
+            ++index;
+        }
+    }
+    notify_event_t notification;
+    while (xQueueReceive(s_notify_queue, &notification, 0) == pdTRUE) {
+        record_notification_received();
+        if (notification.attr_handle != target_handle) {
+            pending_notification_store(&notification);
+        }
+    }
+}
+
+static void auth_transport_delay(void *context, uint32_t delay_ms)
+{
+    (void)context;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+}
+
+static bool auth_transport_random(void *context, uint8_t *data, size_t data_len)
+{
+    (void)context;
+    if (data == NULL || data_len == 0U) {
+        return false;
+    }
+    esp_fill_random(data, data_len);
+    return true;
+}
+
+static bool authentication_status_counts_failure(
+    cuktech_miot_auth_status_t status)
+{
+    return status != CUKTECH_MIOT_AUTH_DISCONNECTED &&
+           status != CUKTECH_MIOT_AUTH_TRANSPORT_ERROR;
+}
+
+static cuktech_miot_auth_status_t authenticate_link(uint32_t failure_count)
+{
+    const cuktech_miot_auth_transport_t transport = {
+        .context = NULL,
+        .write = auth_transport_write,
+        .receive = auth_transport_receive,
+        .discard = auth_transport_discard,
+        .delay_ms = auth_transport_delay,
+        .fill_random = auth_transport_random,
+    };
+    update_status(CUKTECH_BLE_STATE_AUTHENTICATING, true, true, 0U, 0U, "");
+    update_authentication_status(false, failure_count, NULL);
+    ESP_LOGI(TAG, "starting MiOT login authentication");
+    cuktech_miot_auth_status_t status =
+        cuktech_miot_authenticate(s_token, &transport, &s_session);
+    if (status == CUKTECH_MIOT_AUTH_OK) {
+        update_status(CUKTECH_BLE_STATE_AUTHENTICATED, true, true, 0U, 0U, "");
+        update_authentication_status(true, 0U, "");
+        ESP_LOGI(TAG, "MiOT login authentication succeeded");
+    } else {
+        char error[CUKTECH_BLE_LAST_ERROR_MAX_LEN + 1U];
+        snprintf(error, sizeof(error), "auth:%s",
+                 cuktech_miot_auth_status_name(status));
+        uint32_t reported_failures =
+            failure_count +
+            (authentication_status_counts_failure(status) ? 1U : 0U);
+        update_authentication_status(false, reported_failures, error);
+        ESP_LOGW(TAG, "MiOT login authentication failed stage=%s",
+                 cuktech_miot_auth_status_name(status));
+    }
+    return status;
 }
 
 static bool handle_common_failure_event(const control_event_t *event,
@@ -925,12 +1173,12 @@ static bool prepare_gatt_link(void)
     discovered_characteristic_t
         characteristics[BLE_MAX_DISCOVERED_CHARACTERISTICS] = {0};
     size_t characteristic_count = 0U;
-    miot_characteristic_t miot_characteristics[MIOT_CHAR_COUNT] = {0};
+    memset(s_miot_characteristics, 0, sizeof(s_miot_characteristics));
 
     if (!exchange_mtu() || !discover_service(&service_start, &service_end) ||
         !discover_characteristics(service_start, service_end, characteristics,
                                   &characteristic_count,
-                                  miot_characteristics)) {
+                                  s_miot_characteristics)) {
         return false;
     }
     update_status(CUKTECH_BLE_STATE_DISCOVERING_DESCRIPTORS, true, false,
@@ -939,7 +1187,7 @@ static bool prepare_gatt_link(void)
          index < sizeof(SUBSCRIBE_TARGETS) / sizeof(SUBSCRIBE_TARGETS[0]);
          ++index) {
         if (!discover_cccd(characteristics, characteristic_count, service_end,
-                           &miot_characteristics[SUBSCRIBE_TARGETS[index]])) {
+                           &s_miot_characteristics[SUBSCRIBE_TARGETS[index]])) {
             return false;
         }
     }
@@ -948,7 +1196,7 @@ static bool prepare_gatt_link(void)
          index < sizeof(SUBSCRIBE_TARGETS) / sizeof(SUBSCRIBE_TARGETS[0]);
          ++index) {
         if (!subscribe_characteristic(
-                &miot_characteristics[SUBSCRIBE_TARGETS[index]])) {
+                &s_miot_characteristics[SUBSCRIBE_TARGETS[index]])) {
             return false;
         }
     }
@@ -957,15 +1205,71 @@ static bool prepare_gatt_link(void)
     return true;
 }
 
+static void disable_notifications_best_effort(void)
+{
+    const uint8_t disable_notifications[2] = {0x00, 0x00};
+    for (size_t index = 0U;
+         index < sizeof(SUBSCRIBE_TARGETS) / sizeof(SUBSCRIBE_TARGETS[0]);
+         ++index) {
+        uint16_t cccd_handle =
+            s_miot_characteristics[SUBSCRIBE_TARGETS[index]].cccd_handle;
+        if (cccd_handle == 0U || s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+            continue;
+        }
+        int rc = ble_gattc_write_flat(
+            s_conn_handle, cccd_handle, disable_notifications,
+            sizeof(disable_notifications), write_callback,
+            (void *)(uintptr_t)cccd_handle);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "CCCD cleanup start failed rc=%d", rc);
+            continue;
+        }
+        control_event_t event;
+        TickType_t started = xTaskGetTickCount();
+        TickType_t timeout = pdMS_TO_TICKS(1000U);
+        while (xTaskGetTickCount() - started < timeout) {
+            uint32_t remaining =
+                (uint32_t)((timeout - (xTaskGetTickCount() - started)) *
+                           portTICK_PERIOD_MS);
+            if (!wait_control_event(&event, remaining)) {
+                break;
+            }
+            if (event.type == CONTROL_EVENT_WRITE_DONE &&
+                event.data.write.attr_handle == cccd_handle) {
+                if (event.status != 0) {
+                    ESP_LOGW(TAG, "CCCD cleanup failed status=%d",
+                             event.status);
+                }
+                break;
+            }
+            if (event.type == CONTROL_EVENT_DISCONNECTED) {
+                s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                return;
+            }
+        }
+    }
+}
+
 static void disconnect_cleanly(void)
 {
     if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        cuktech_session_clear(&s_session);
+        memset(s_miot_characteristics, 0, sizeof(s_miot_characteristics));
         update_status(CUKTECH_BLE_STATE_DISCONNECTING, false, false, 0U, 0U,
                       NULL);
         return;
     }
     uint16_t handle = s_conn_handle;
     update_status(CUKTECH_BLE_STATE_DISCONNECTING, true, false, 0U, 0U, NULL);
+    disable_notifications_best_effort();
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        cuktech_session_clear(&s_session);
+        memset(s_miot_characteristics, 0, sizeof(s_miot_characteristics));
+        update_status(CUKTECH_BLE_STATE_DISCONNECTING, false, false, 0U, 0U,
+                      NULL);
+        discard_queued_events();
+        return;
+    }
     int rc = ble_gap_terminate(handle, BLE_ERR_REM_USER_CONN_TERM);
     if (rc != 0 && rc != BLE_HS_ENOTCONN) {
         ESP_LOGW(TAG, "disconnect request failed rc=%d", rc);
@@ -988,6 +1292,8 @@ static void disconnect_cleanly(void)
         }
     }
     s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    cuktech_session_clear(&s_session);
+    memset(s_miot_characteristics, 0, sizeof(s_miot_characteristics));
     update_status(CUKTECH_BLE_STATE_DISCONNECTING, false, false, 0U, 0U, NULL);
     discard_queued_events();
 }
@@ -996,12 +1302,16 @@ static void wait_until_disconnected(void)
 {
     control_event_t event;
     while (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        if (!wait_control_event(&event, 1000U)) {
+        drain_notifications();
+        if (!wait_control_event(&event, 100U)) {
             continue;
         }
         if (event.type == CONTROL_EVENT_DISCONNECTED) {
             ESP_LOGW(TAG, "BLE link disconnected reason=%d", event.status);
             s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            cuktech_session_clear(&s_session);
+            memset(s_miot_characteristics, 0,
+                   sizeof(s_miot_characteristics));
             update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
                           "peer_disconnected");
             return;
@@ -1029,15 +1339,45 @@ static void ble_application_task(void *argument)
         return;
     }
     uint32_t backoff = 0U;
+    uint32_t authentication_failures = 0U;
     for (;;) {
+        bool authentication_failed = false;
         discard_queued_events();
         if (scan_then_connect() && prepare_gatt_link()) {
-            backoff = 0U;
-            wait_until_disconnected();
+            cuktech_miot_auth_status_t auth_status =
+                authenticate_link(authentication_failures);
+            if (auth_status == CUKTECH_MIOT_AUTH_OK) {
+                authentication_failures = 0U;
+                backoff = 0U;
+                wait_until_disconnected();
+            } else {
+                authentication_failed = true;
+                if (authentication_status_counts_failure(auth_status)) {
+                    ++authentication_failures;
+                }
+                disconnect_cleanly();
+                if (authentication_failures >= BLE_AUTH_FAILURE_LOCK_COUNT) {
+                    update_status(CUKTECH_BLE_STATE_AUTH_FAILED_LOCKED, false,
+                                  false, 0U, 0U, NULL);
+                    update_authentication_status(false,
+                                                 authentication_failures,
+                                                 NULL);
+                    ESP_LOGE(TAG,
+                             "MiOT authentication locked after %" PRIu32
+                             " consecutive failures; reboot or manual retry required",
+                             authentication_failures);
+                    for (;;) {
+                        vTaskDelay(pdMS_TO_TICKS(1000U));
+                    }
+                }
+            }
         } else {
             disconnect_cleanly();
         }
         backoff = cuktech_ble_next_backoff(backoff, BLE_RETRY_MAX_SECONDS);
+        if (authentication_failed && backoff < BLE_AUTH_MIN_RETRY_SECONDS) {
+            backoff = BLE_AUTH_MIN_RETRY_SECONDS;
+        }
         retry_delay(backoff);
     }
 }
@@ -1076,6 +1416,7 @@ esp_err_t cuktech_ble_start(const app_config_t *config)
     }
     s_target_address.type = BLE_ADDR_PUBLIC;
     cuktech_ble_mac_to_nimble(display_order, s_target_address.val);
+    memcpy(s_token, config->token, sizeof(s_token));
 
     esp_err_t error = nimble_port_init();
     if (error != ESP_OK) {
