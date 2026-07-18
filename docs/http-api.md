@@ -142,3 +142,14 @@ Secret 规则：
 ```
 
 禁用请求会中断扫描、连接、GATT 发现、认证、设置刷新或退避等待，随后尽力关闭 CCCD、断开连接、清除会话密钥并把四个端口遥测归零。启用请求不会清除认证失败次数以外的持久配置；若 MAC 或 Token 无效，需要通过 `/api/config` 修正并按接口行为重启。
+
+## `POST /api/retry-ble`
+
+只在 `sta_connected` 且 `ble_state=auth_failed_locked` 时接受。请求不允许携带请求体：
+
+```text
+POST /api/retry-ble
+Content-Length: 0
+```
+
+成功返回 `{"ok":true,"request_id":5}`，清零连续认证失败计数并立即重新进入扫描/认证流程。未锁定时返回 `ble_not_auth_locked`，带请求体返回 `body_not_allowed`，队列不可用返回 `ble_retry_unavailable`。该接口不修改 Token、BLE Key、MQTT 或 Wi-Fi 配置。

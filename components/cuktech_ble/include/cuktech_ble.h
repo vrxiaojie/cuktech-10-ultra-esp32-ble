@@ -54,3 +54,4 @@ const char *cuktech_ble_state_name(cuktech_ble_state_t state);
 esp_err_t cuktech_ble_submit_command(const cuktech_control_command_t *command,
                                      uint32_t *request_id);
 esp_err_t cuktech_ble_set_enabled(bool enabled, uint32_t *request_id);
+esp_err_t cuktech_ble_retry_auth(uint32_t *request_id);

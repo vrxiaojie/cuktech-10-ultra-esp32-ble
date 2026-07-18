@@ -67,3 +67,14 @@ uint32_t cuktech_ble_next_backoff(uint32_t current_seconds,
     }
     return current_seconds * 2U;
 }
+
+uint32_t cuktech_ble_next_request_id(uint32_t current_id)
+{
+    return current_id == UINT32_MAX ? 1U : current_id + 1U;
+}
+
+bool cuktech_ble_failure_limit_reached(uint32_t consecutive_failures,
+                                       uint32_t limit)
+{
+    return limit > 0U && consecutive_failures >= limit;
+}
