@@ -190,3 +190,17 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - 长时间真机运行、反复断网/断 Broker/断 BLE、电源循环、认证锁定恢复和堆内存趋势：当前未发现串口，尚未完成
 
 详细恢复策略和安全边界见 [韧性与安全](resilience-security.md)。
+
+## 阶段 12 验证
+
+- `idf.py reconfigure && idf.py build && idf.py size`：通过，ESP-IDF v5.5.2-dirty，目标 `esp32c3`
+- 固件镜像：`0xfa610`，默认 1 MiB app 分区剩余 `0x59f0`（约 2%），未修改分区表
+- 主机测试：10/10 通过；ASan/UBSan 10/10 通过，受控环境不支持 LeakSanitizer，关闭 leak 检测
+- CI：保留 ESP-IDF v5.5.2 的 `esp32c3` build 和两轮主机测试路径
+- 发布文档：覆盖 WSL usbipd、实际串口识别、独立 flash/monitor、首次配网、STA 管理、MQTT 快速验收和升级边界
+- HA 文档：按固定上游自定义集成 v1.0.5 源码确认 topic、Server URL、`/api/status` 与 `/api/enable` 契约
+- 许可证：仓库 MIT；协议与 BLE 组件继续保留固定上游提交的 MIT 许可证副本和归属
+- Secret：发布文档不包含真实凭据；示例只使用占位符或 `AGENTS.md` 合成向量
+- 真机状态：2026-07-18 仍未发现 `/dev/ttyACM*` 或 `/dev/ttyUSB*`，未执行烧录和 monitor，详见 [真机验收记录](hardware-validation.md)
+
+阶段 12 完成的是可发布软件、构建证据和操作手册，不把缺少硬件的运行路径标记为真机确认。
