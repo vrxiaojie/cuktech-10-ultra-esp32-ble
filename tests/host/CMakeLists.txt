@@ -49,6 +49,22 @@ if(IDF_PATH AND EXISTS "${IDF_PATH}/components/json/cJSON/cJSON.c")
 endif()
 
 if(EXISTS "/usr/include/openssl/evp.h")
+    add_executable(miot_auth_tests
+        test_miot_auth.c
+        crypto_openssl.c
+        ../../components/cuktech_ble/cuktech_miot_auth.c
+        ../../components/cuktech_protocol/cuktech_protocol.c
+    )
+    target_include_directories(miot_auth_tests PRIVATE
+        ../../components/cuktech_ble/include
+        ../../components/cuktech_protocol/include
+        ../../components/cuktech_protocol
+    )
+    target_compile_features(miot_auth_tests PRIVATE c_std_17)
+    target_compile_options(miot_auth_tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(miot_auth_tests PRIVATE crypto)
+    add_test(NAME miot_auth_tests COMMAND miot_auth_tests)
+
     add_executable(protocol_tests
         test_protocol.c
         crypto_openssl.c

@@ -19,6 +19,8 @@
 
 BLE Key、反序 MAC 辅助值和 `PRODUCT_ID=0x660e` 均未进入当前上游认证调用链。本项目不会把这些值混入 HKDF、HMAC 或 AES。
 
+认证传输状态机同样按该固定提交确认：`a4` 初始化、回写递增的协商帧、等长 `f2` 占位、`0x24` 登录、随机数与 HMAC 的 RCV_RDY/RCV_OK 握手，以及认证控制 `0x21/0x11` 成功、`0x23/0x12` 失败。固件同时实现上游当前 inline 与 multiframe 两种认证响应格式。
+
 ## 测试向量确认
 
 仓库 `AGENTS.md` 中的合成黄金向量已由主机测试验证：
@@ -29,6 +31,7 @@ BLE Key、反序 MAC 辅助值和 `PRODUCT_ID=0x660e` 均未进入当前上游�
 - AES-CCM 篡改拒绝
 - SET/GET TLV 字节序和长度
 - C1 端口 20.1 V、2.5 A、50.2 W、PD 样例
+- 完整认证写入/通知顺序、短初始化恢复、inline/multiframe 和 HMAC 拒绝
 
 主机测试链接 OpenSSL，仅作为独立、无需 ESP32 的算法验证后端；固件编译使用 ESP-IDF 自带 mbedTLS。两者共享相同的会话、Nonce、计数器、TLV 和解析代码。
 

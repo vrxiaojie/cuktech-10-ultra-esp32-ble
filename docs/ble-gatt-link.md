@@ -35,7 +35,7 @@ GAP/GATT 回调只复制事件并进行无等待入队：
 - 队列满或超长 Notify 会增加脱敏的丢弃计数，不打印负载。
 - HKDF、HMAC、AES-CCM、JSON、HTTP 和 MQTT 均不在 NimBLE Host task 中执行。
 
-`GET /api/status` 增加 `ble_state`、`ble_gatt_ready`、`ble_mtu` 和 `ble_notify_dropped`。兼容字段仍保留；在阶段 07 完成前 `authenticated` 固定为 `false`。
+`GET /api/status` 增加 `ble_state`、`ble_gatt_ready`、`ble_mtu` 和 `ble_notify_dropped`。兼容字段仍保留；阶段 07 起 `authenticated` 反映真实 MiOT 登录结果。
 
 ## 固件容量
 

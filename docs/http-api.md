@@ -18,13 +18,18 @@ HTTP 管理页没有 TLS 或登录认证，只适用于可信局域网。首次�
   "protocol_extend": 0,
   "protocol_switches": {},
   "wifi_state": "sta_connected",
-  "ble_state": "not_started",
+  "ble_state": "authenticated",
+  "ble_gatt_ready": true,
+  "ble_mtu": 247,
+  "ble_notify_dropped": 0,
   "last_error": "",
   "free_heap": 123456
 }
 ```
 
-`connected` 和 `authenticated` 表示 BLE 状态，不表示 Wi-Fi 状态。在 BLE 阶段完成前它们保持 `false`，后续实现不得移除当前兼容字段。
+`connected` 和 `authenticated` 表示 BLE/MiOT 登录状态，不表示 Wi-Fi 状态。认证进行中 `connected=true`、`authenticated=false`；只有设备 HMAC 校验和认证控制成功结果均通过后，`authenticated` 才为 `true`。`ble_state` 可能为 `scanning`、`connecting`、`authenticating`、`authenticated`、`auth_failed_locked` 或错误/退避状态。
+
+`last_error` 只包含稳定阶段名和错误码，例如 `auth:device_hmac_mismatch`，不会包含 Token、随机数、Key、IV、HMAC 或完整认证帧。
 
 ## `GET /api/config`
 
