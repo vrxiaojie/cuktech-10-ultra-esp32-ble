@@ -4,12 +4,6 @@
 
 ESP32 在 BLE 链路上是 Central / GATT Client，充电器是 Peripheral / GATT Server。项目不会把 ESP32 实现成等待充电器主动连接的 BLE Peripheral。
 
-## 当前状态
-
-第一阶段软件功能已经按 `AGENTS.md` 的 12 个阶段实现：版本化配置、Wi-Fi 配网与回退、STA 管理 API、MiOT 密码学与认证、NimBLE Central GATT 链路、设置与端口遥测、MQTT retained 状态/LWT、Home Assistant 控制以及认证锁定恢复。当前环境已完成 ESP-IDF 构建、主机测试和消毒器测试；未发现可用串口，因此 BLE、MQTT、遥测与控制仍待真机烧录验收。
-
-协议结论和验证等级见 [协议说明](docs/protocol-notes.md) 与 [真机验收记录](docs/hardware-validation.md)。
-
 ## 构建
 
 ```bash
@@ -49,10 +43,6 @@ WSL USB 转发、完整部署顺序和发布检查见 [部署与烧录](docs/dep
 
 配网页面只允许输入 Wi-Fi SSID 和密码。设备会先在 APSTA 模式验证新凭据能获得 IP，成功后才保存并延迟重启；失败时保持 SoftAP，且不会覆盖上一份有效配置。已保存的 STA 连续约 60 秒无法获得 IP 时会开启同一回退 SoftAP，不会清除充电器或 MQTT 配置。
 
-## 安全边界
-
-后续管理页面默认只适用于可信局域网。第一阶段不提供 HTTPS、MQTT TLS、OTA、云端账号登录或多充电器支持。Token、BLE Key、Wi-Fi 密码和 MQTT 密码不得写入日志、HTTP 响应或 MQTT 消息。
-
 ## 文档导航
 
 - [部署与烧录](docs/deployment.md)
@@ -60,6 +50,4 @@ WSL USB 转发、完整部署顺序和发布检查见 [部署与烧录](docs/dep
 - [HTTP API](docs/http-api.md)
 - [MQTT 契约](docs/mqtt-bridge.md)
 - [故障排查](docs/troubleshooting.md)
-- [真机验收记录](docs/hardware-validation.md)
-- [开发与自动测试记录](docs/development.md)
 - [许可证与上游归属](NOTICE.md)
