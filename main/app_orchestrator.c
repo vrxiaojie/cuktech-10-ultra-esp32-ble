@@ -1,7 +1,9 @@
 #include "app_orchestrator.h"
 
+#include "app_config.h"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
+#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
 
@@ -11,6 +13,8 @@ void app_orchestrator_start(void)
 {
     esp_chip_info_t chip_info = {0};
     const esp_app_desc_t *app_desc = esp_app_get_description();
+    app_config_t config;
+    bool config_found = false;
 
     esp_chip_info(&chip_info);
 
@@ -19,5 +23,24 @@ void app_orchestrator_start(void)
     ESP_LOGI(TAG, "target=esp32c3 cores=%d revision=%d", chip_info.cores,
              chip_info.revision);
     ESP_LOGI(TAG, "free_heap=%lu", (unsigned long)esp_get_free_heap_size());
+
+    esp_err_t error = app_config_store_init();
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "NVS initialization failed: %s", esp_err_to_name(error));
+        return;
+    }
+    error = app_config_load(&config, &config_found);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "configuration load failed: %s; defaults kept in memory",
+                 esp_err_to_name(error));
+    } else {
+        ESP_LOGI(TAG,
+                 "configuration loaded: persisted=%s wifi=%s token=%s ble_key=%s mqtt_password=%s ble_enabled=%s",
+                 config_found ? "yes" : "no", config.wifi_configured ? "yes" : "no",
+                 config.token_configured ? "yes" : "no",
+                 config.ble_key_configured ? "yes" : "no",
+                 config.mqtt_password_configured ? "yes" : "no",
+                 config.ble_enabled ? "yes" : "no");
+    }
     ESP_LOGI(TAG, "orchestrator ready; services will start in later stages");
 }
