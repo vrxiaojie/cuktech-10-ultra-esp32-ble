@@ -5,6 +5,7 @@
 
 #include "app_config.h"
 #include "cJSON.h"
+#include "charger_state.h"
 #include "cuktech_ble.h"
 #include "esp_app_desc.h"
 #include "esp_check.h"
@@ -225,27 +226,111 @@ static esp_err_t status_handler(httpd_req_t *request)
     const esp_app_desc_t *app = esp_app_get_description();
     cuktech_ble_status_t ble_status;
     cuktech_ble_get_status(&ble_status);
-    char response[512];
-    int written = snprintf(
-        response, sizeof(response),
-        "{\"connected\":%s,\"authenticated\":%s,\"mqtt_connected\":false,"
-        "\"device_model\":\"\",\"firmware_version\":\"%s\",\"ports\":{},"
-        "\"settings\":{},\"protocol_extend\":0,\"protocol_switches\":{},"
-        "\"wifi_state\":\"%s\",\"ble_state\":\"%s\",\"ble_gatt_ready\":%s,"
-        "\"ble_mtu\":%u,\"ble_notify_dropped\":%lu,"
-        "\"last_error\":\"%s\",\"free_heap\":%lu}",
-        ble_status.connected ? "true" : "false",
-        ble_status.authenticated ? "true" : "false", app->version,
-        wifi_manager_state_name(wifi_manager_get_state()),
-        cuktech_ble_state_name(ble_status.state),
-        ble_status.gatt_ready ? "true" : "false", ble_status.mtu,
-        (unsigned long)ble_status.notifications_dropped, ble_status.last_error,
-        (unsigned long)esp_get_free_heap_size());
-    if (written < 0 || (size_t)written >= sizeof(response)) {
+    charger_state_snapshot_t state;
+    charger_state_get_snapshot(&state);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON *ports = cJSON_CreateObject();
+    cJSON *settings = cJSON_CreateObject();
+    cJSON *protocol_switches = cJSON_CreateObject();
+    if (root == NULL || ports == NULL || settings == NULL ||
+        protocol_switches == NULL) {
+        cJSON_Delete(root);
+        cJSON_Delete(ports);
+        cJSON_Delete(settings);
+        cJSON_Delete(protocol_switches);
         return send_json(request, "500 Internal Server Error",
-                         "{\"error\":\"status_too_large\"}");
+                         "{\"error\":\"out_of_memory\"}");
     }
-    return send_json(request, "200 OK", response);
+    cJSON_AddBoolToObject(root, "connected", state.connected);
+    cJSON_AddBoolToObject(root, "authenticated", state.authenticated);
+    cJSON_AddBoolToObject(root, "mqtt_connected", false);
+    cJSON_AddStringToObject(root, "device_model", state.device_model);
+    cJSON_AddStringToObject(root, "firmware_version",
+                           state.firmware_version);
+
+    static const char *PORT_NAMES[CHARGER_STATE_PORT_COUNT] = {
+        "c1", "c2", "c3", "a",
+    };
+    uint32_t enabled_mask =
+        state.setting_valid[16U] ? state.settings[16U] : 0x0fU;
+    for (size_t index = 0U; index < CHARGER_STATE_PORT_COUNT; ++index) {
+        cJSON *port = cJSON_CreateObject();
+        if (port == NULL) {
+            cJSON_Delete(root);
+            cJSON_Delete(ports);
+            cJSON_Delete(settings);
+            cJSON_Delete(protocol_switches);
+            return send_json(request, "500 Internal Server Error",
+                             "{\"error\":\"out_of_memory\"}");
+        }
+        cJSON_AddNumberToObject(port, "voltage", state.ports[index].voltage);
+        cJSON_AddNumberToObject(port, "current", state.ports[index].current);
+        cJSON_AddNumberToObject(port, "power", state.ports[index].power);
+        cJSON_AddBoolToObject(port, "active", state.ports[index].active);
+        cJSON_AddStringToObject(
+            port, "protocol",
+            cuktech_charge_protocol_name(state.ports[index].protocol));
+        cJSON_AddBoolToObject(port, "enabled",
+                              (enabled_mask & (1UL << index)) != 0U);
+        cJSON_AddItemToObject(ports, PORT_NAMES[index], port);
+    }
+    cJSON_AddItemToObject(root, "ports", ports);
+
+    char piid_name[4];
+    for (uint16_t piid = 0U; piid <= CHARGER_STATE_MAX_PIID; ++piid) {
+        if (state.setting_valid[piid]) {
+            snprintf(piid_name, sizeof(piid_name), "%u", piid);
+            cJSON_AddNumberToObject(settings, piid_name,
+                                   state.settings[piid]);
+        }
+    }
+    cJSON_AddItemToObject(root, "settings", settings);
+    cJSON_AddNumberToObject(root, "protocol_extend", state.protocol_extend);
+    for (size_t index = 0U; index < CHARGER_STATE_PORT_COUNT; ++index) {
+        cJSON *switches = cJSON_CreateObject();
+        if (switches == NULL) {
+            cJSON_Delete(root);
+            cJSON_Delete(protocol_switches);
+            return send_json(request, "500 Internal Server Error",
+                             "{\"error\":\"out_of_memory\"}");
+        }
+        if (index <= 1U) {
+            cJSON_AddBoolToObject(switches, "pd",
+                                  state.protocol_switches[index].pd);
+            cJSON_AddBoolToObject(switches, "pps",
+                                  state.protocol_switches[index].pps);
+        } else {
+            cJSON_AddBoolToObject(switches, "scp",
+                                  state.protocol_switches[index].scp);
+        }
+        cJSON_AddBoolToObject(switches, "ufcs",
+                              state.protocol_switches[index].ufcs);
+        cJSON_AddItemToObject(protocol_switches, PORT_NAMES[index], switches);
+    }
+    cJSON_AddItemToObject(root, "protocol_switches", protocol_switches);
+    cJSON_AddStringToObject(root, "gateway_firmware_version", app->version);
+    cJSON_AddStringToObject(root, "wifi_state",
+                           wifi_manager_state_name(wifi_manager_get_state()));
+    cJSON_AddStringToObject(root, "ble_state",
+                           cuktech_ble_state_name(ble_status.state));
+    cJSON_AddBoolToObject(root, "ble_gatt_ready", ble_status.gatt_ready);
+    cJSON_AddNumberToObject(root, "ble_mtu", ble_status.mtu);
+    cJSON_AddNumberToObject(root, "ble_notify_dropped",
+                           ble_status.notifications_dropped);
+    cJSON_AddStringToObject(root, "last_error", ble_status.last_error);
+    cJSON_AddNumberToObject(root, "free_heap", esp_get_free_heap_size());
+    cJSON_AddNumberToObject(root, "state_revision", state.revision);
+
+    char *response = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (response == NULL) {
+        return send_json(request, "500 Internal Server Error",
+                         "{\"error\":\"out_of_memory\"}");
+    }
+    esp_err_t error = send_json(request, "200 OK", response);
+    cJSON_free(response);
+    return error;
 }
 
 static esp_err_t config_get_handler(httpd_req_t *request)

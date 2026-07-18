@@ -126,3 +126,20 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - 真机认证：当前环境未发现串口，尚未完成，不能标记为真机确认
 
 详细状态机见 [MiOT BLE 登录认证](miot-auth.md)。
+
+## 阶段 08 验证
+
+- `idf.py build`：通过，ESP-IDF 5.5.2，目标 `esp32c3`
+- 固件镜像：`0xf0710`，默认 1 MiB app 分区剩余 `0xf8f0`（约 6%），未修改分区表
+- 主机测试：7/7 通过，新增状态快照和加密命令通道测试
+- 命令发送：黄金 TX 包、RCV_RDY/RCV_OK 顺序和 `0xffff` 主动重建会话要求通过
+- 命令接收：黄金 RX inline、两帧连续 multiframe 重组和 ACK 顺序通过
+- GET result：UINT8/UINT32、SIID 和完整 16 位 PIID 匹配通过
+- 状态模型：PIID 17/18 PDO 拆分、PIID 21 协议开关、端口快照通过
+- 运行策略：认证后处理积压 Notify，首次读取 15 个设置 PIID，约每 60 秒刷新
+- 恢复：连续 10 次 AES-CCM 解密失败触发会话重连；意外断线保留最后遥测快照
+- `/api/status`：返回四端口稳定字段、字符串 PIID 设置、协议开关、充电器/网关固件版本
+- Secret：命令与遥测日志不输出 Token、Key/IV、HMAC、完整认证帧或加密包
+- 真机命令握手、设备信息、设置读取、端口 Notify 和长期刷新：当前未发现串口，尚未完成
+
+详细设计和证据等级见 [充电器设置与端口遥测](charger-telemetry.md)。

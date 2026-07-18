@@ -27,6 +27,19 @@ target_compile_features(cuktech_ble_core_tests PRIVATE c_std_17)
 target_compile_options(cuktech_ble_core_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME cuktech_ble_core_tests COMMAND cuktech_ble_core_tests)
 
+add_executable(charger_state_tests
+    test_charger_state.c
+    ../../components/charger_state/charger_state_core.c
+)
+target_include_directories(charger_state_tests PRIVATE
+    ../../components/charger_state/include
+    ../../components/cuktech_protocol/include
+)
+target_compile_features(charger_state_tests PRIVATE c_std_17)
+target_compile_options(charger_state_tests PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(charger_state_tests PRIVATE m)
+add_test(NAME charger_state_tests COMMAND charger_state_tests)
+
 if(NOT IDF_PATH AND DEFINED ENV{IDF_PATH})
     set(IDF_PATH "$ENV{IDF_PATH}")
 endif()
@@ -64,6 +77,22 @@ if(EXISTS "/usr/include/openssl/evp.h")
     target_compile_options(miot_auth_tests PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(miot_auth_tests PRIVATE crypto)
     add_test(NAME miot_auth_tests COMMAND miot_auth_tests)
+
+    add_executable(command_tests
+        test_command.c
+        crypto_openssl.c
+        ../../components/cuktech_ble/cuktech_command.c
+        ../../components/cuktech_protocol/cuktech_protocol.c
+    )
+    target_include_directories(command_tests PRIVATE
+        ../../components/cuktech_ble/include
+        ../../components/cuktech_protocol/include
+        ../../components/cuktech_protocol
+    )
+    target_compile_features(command_tests PRIVATE c_std_17)
+    target_compile_options(command_tests PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(command_tests PRIVATE crypto)
+    add_test(NAME command_tests COMMAND command_tests)
 
     add_executable(protocol_tests
         test_protocol.c

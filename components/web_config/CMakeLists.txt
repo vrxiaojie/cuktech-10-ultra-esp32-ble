@@ -4,6 +4,7 @@ idf_component_register(
         "web_config_model.c"
     INCLUDE_DIRS "include"
     REQUIRES
+        charger_state
         cuktech_ble
         esp_http_server
         esp_system

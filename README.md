@@ -6,7 +6,7 @@ ESP32 在 BLE 链路上是 Central / GATT Client，充电器是 Peripheral / GAT
 
 ## 当前状态
 
-项目正在按照 `AGENTS.md` 的阶段计划开发。当前工程可以为 `esp32c3` 构建，已实现版本化配置、Wi-Fi 配网与回退、STA 管理 API、通过黄金向量验证的 MiOT 协议组件、NimBLE Central GATT 链路，以及支持 inline/multiframe、双向 HMAC 校验和失败锁定的 MiOT 登录状态机。遥测接入和 MQTT 功能将在后续功能分支实现；BLE 链路与认证目前仅完成编译和主机测试，尚未真机验收。
+项目正在按照 `AGENTS.md` 的阶段计划开发。当前工程可以为 `esp32c3` 构建，已实现版本化配置、Wi-Fi 配网与回退、STA 管理 API、通过黄金向量验证的 MiOT 协议组件、NimBLE Central GATT 链路、MiOT 登录状态机，以及认证后的设置读取、端口遥测和线程安全状态快照。MQTT 发布和 HA 控制将在后续功能分支实现；BLE 链路、认证与遥测目前仅完成编译和主机测试，尚未真机验收。
 
 ## 构建
 

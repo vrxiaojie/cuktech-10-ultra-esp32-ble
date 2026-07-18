@@ -11,23 +11,44 @@ HTTP 管理页没有 TLS 或登录认证，只适用于可信局域网。首次�
   "connected": false,
   "authenticated": false,
   "mqtt_connected": false,
-  "device_model": "",
-  "firmware_version": "...",
-  "ports": {},
-  "settings": {},
-  "protocol_extend": 0,
-  "protocol_switches": {},
+  "device_model": "njcuk.fitting.ad1204_...",
+  "firmware_version": "1.0.0",
+  "ports": {
+    "c1": {
+      "voltage": 20.1,
+      "current": 2.5,
+      "power": 50.2,
+      "active": true,
+      "protocol": "PD",
+      "enabled": true
+    },
+    "c2": {"voltage": 0, "current": 0, "power": 0, "active": false, "protocol": "idle", "enabled": true},
+    "c3": {"voltage": 0, "current": 0, "power": 0, "active": false, "protocol": "idle", "enabled": true},
+    "a": {"voltage": 0, "current": 0, "power": 0, "active": false, "protocol": "idle", "enabled": true}
+  },
+  "settings": {"5": 3, "16": 15, "21": 50532111},
+  "protocol_extend": 50532111,
+  "protocol_switches": {
+    "c1": {"pd": true, "pps": true, "ufcs": true},
+    "c2": {"pd": true, "pps": true, "ufcs": true},
+    "c3": {"scp": true, "ufcs": true},
+    "a": {"scp": true, "ufcs": true}
+  },
+  "gateway_firmware_version": "...",
   "wifi_state": "sta_connected",
   "ble_state": "authenticated",
   "ble_gatt_ready": true,
   "ble_mtu": 247,
   "ble_notify_dropped": 0,
   "last_error": "",
-  "free_heap": 123456
+  "free_heap": 123456,
+  "state_revision": 20
 }
 ```
 
 `connected` 和 `authenticated` 表示 BLE/MiOT 登录状态，不表示 Wi-Fi 状态。认证进行中 `connected=true`、`authenticated=false`；只有设备 HMAC 校验和认证控制成功结果均通过后，`authenticated` 才为 `true`。`ble_state` 可能为 `scanning`、`connecting`、`authenticating`、`authenticated`、`auth_failed_locked` 或错误/退避状态。
+
+`firmware_version` 是从充电器 GATT 特征读取的版本；`gateway_firmware_version` 是 ESP32 固件版本。读取失败时充电器型号或版本为空字符串，但字段仍保留。`settings` 使用字符串 PIID 键；`ports` 只包含稳定遥测字段。意外断线会保留最后端口和设置快照，同时把连接状态置为 false。
 
 `last_error` 只包含稳定阶段名和错误码，例如 `auth:device_hmac_mismatch`，不会包含 Token、随机数、Key、IV、HMAC 或完整认证帧。
 
