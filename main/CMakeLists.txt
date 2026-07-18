@@ -7,6 +7,7 @@ idf_component_register(
     REQUIRES
         app_config
         bt
+        cuktech_ble
         cuktech_protocol
         esp_app_format
         esp_http_server

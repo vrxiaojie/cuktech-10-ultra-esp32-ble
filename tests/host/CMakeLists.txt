@@ -16,6 +16,17 @@ target_compile_options(app_config_tests PRIVATE -Wall -Wextra -Werror)
 
 add_test(NAME app_config_tests COMMAND app_config_tests)
 
+add_executable(cuktech_ble_core_tests
+    test_cuktech_ble_core.c
+    ../../components/cuktech_ble/cuktech_ble_core.c
+)
+target_include_directories(cuktech_ble_core_tests PRIVATE
+    ../../components/cuktech_ble/include
+)
+target_compile_features(cuktech_ble_core_tests PRIVATE c_std_17)
+target_compile_options(cuktech_ble_core_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME cuktech_ble_core_tests COMMAND cuktech_ble_core_tests)
+
 if(NOT IDF_PATH AND DEFINED ENV{IDF_PATH})
     set(IDF_PATH "$ENV{IDF_PATH}")
 endif()

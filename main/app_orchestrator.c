@@ -1,6 +1,7 @@
 #include "app_orchestrator.h"
 
 #include "app_config.h"
+#include "cuktech_ble.h"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
 #include "esp_err.h"
@@ -53,6 +54,10 @@ void app_orchestrator_start(void)
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "provisioning HTTP server start failed: %s", esp_err_to_name(error));
         return;
+    }
+    error = cuktech_ble_start(&config);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "BLE Central start failed: %s", esp_err_to_name(error));
     }
     ESP_LOGI(TAG, "orchestrator ready: wifi_state=%s",
              wifi_manager_state_name(wifi_manager_get_state()));
