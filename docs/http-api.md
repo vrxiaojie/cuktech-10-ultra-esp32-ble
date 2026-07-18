@@ -41,8 +41,15 @@ HTTP 管理页没有 TLS 或登录认证，只适用于可信局域网。首次�
   "ble_gatt_ready": true,
   "ble_mtu": 247,
   "ble_notify_dropped": 0,
+  "ble_commands_accepted": 3,
+  "ble_commands_completed": 3,
+  "ble_commands_failed": 0,
+  "ble_last_request_id": 3,
   "mqtt_reconnects": 1,
   "mqtt_publish_failures": 0,
+  "mqtt_commands_received": 2,
+  "mqtt_commands_accepted": 2,
+  "mqtt_commands_rejected": 0,
   "last_error": "",
   "free_heap": 123456,
   "state_revision": 20
@@ -119,3 +126,19 @@ Secret 规则：
 - 所有字段完整校验通过后才保存 NVS；失败不会修改旧配置。
 
 成功返回 `{"ok":true}`，并约 3 秒后受控重启，使后续 BLE/MQTT 服务使用新配置。常见错误为 `body_too_large`、`invalid_json`、`missing_fields`、`invalid_field`、`invalid_config`、`config_load_failed` 和 `config_save_failed`。
+
+## `POST /api/enable`
+
+只在 `sta_connected` 状态开放，用于兼容上游并运行时启用或禁用 BLE：
+
+```json
+{"enabled": false}
+```
+
+请求体必须包含布尔字段 `enabled`。接口先持久化 `ble_enabled`，再向 BLE task 投递启停请求；如果运行时队列不可用，会回滚原配置并返回 `ble_runtime_unavailable`。成功示例：
+
+```json
+{"ok":true,"enabled":false,"request_id":4}
+```
+
+禁用请求会中断扫描、连接、GATT 发现、认证、设置刷新或退避等待，随后尽力关闭 CCCD、断开连接、清除会话密钥并把四个端口遥测归零。启用请求不会清除认证失败次数以外的持久配置；若 MAC 或 Token 无效，需要通过 `/api/config` 修正并按接口行为重启。

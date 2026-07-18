@@ -27,6 +27,7 @@
 
 #define BLE_CONTROL_QUEUE_DEPTH 32U
 #define BLE_NOTIFY_QUEUE_DEPTH 12U
+#define BLE_REQUEST_QUEUE_DEPTH 8U
 #define BLE_NOTIFY_MAX_PAYLOAD 244U
 #define BLE_MAX_DISCOVERED_CHARACTERISTICS 24U
 #define BLE_SCAN_DURATION_MS 5000
@@ -109,6 +110,20 @@ typedef struct {
     uint8_t data[BLE_NOTIFY_MAX_PAYLOAD];
 } notify_event_t;
 
+typedef enum {
+    BLE_REQUEST_CONTROL = 0,
+    BLE_REQUEST_ENABLE,
+} ble_request_type_t;
+
+typedef struct {
+    ble_request_type_t type;
+    uint32_t request_id;
+    union {
+        cuktech_control_command_t control;
+        bool enabled;
+    } data;
+} ble_request_t;
+
 typedef struct {
     uint16_t def_handle;
     uint16_t val_handle;
@@ -159,6 +174,7 @@ static const uint16_t READABLE_SETTINGS_PIIDS[] = {
 
 static QueueHandle_t s_control_queue;
 static QueueHandle_t s_notify_queue;
+static QueueHandle_t s_request_queue;
 static TaskHandle_t s_ble_task;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static cuktech_ble_status_t s_status = {.state = CUKTECH_BLE_STATE_NOT_STARTED};
@@ -171,7 +187,10 @@ static size_t s_pending_notification_count;
 static uint8_t s_own_address_type;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static volatile bool s_control_overflow;
+static uint32_t s_next_request_id;
 static bool s_started;
+
+static void notify_ble_task(void);
 
 static bool uuid_matches_miot_id(const ble_uuid_t *uuid, uint32_t id)
 {
@@ -314,6 +333,95 @@ void cuktech_ble_get_status(cuktech_ble_status_t *status)
     }
     portENTER_CRITICAL(&s_lock);
     *status = s_status;
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static bool ble_runtime_enabled(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool enabled = s_status.enabled;
+    portEXIT_CRITICAL(&s_lock);
+    return enabled;
+}
+
+static uint32_t allocate_request_id(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    ++s_next_request_id;
+    if (s_next_request_id == 0U) {
+        ++s_next_request_id;
+    }
+    uint32_t request_id = s_next_request_id;
+    portEXIT_CRITICAL(&s_lock);
+    return request_id;
+}
+
+static esp_err_t enqueue_request(const ble_request_t *request,
+                                 uint32_t *request_id)
+{
+    if (s_request_queue == NULL || request == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (xQueueSend(s_request_queue, request, 0) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    portENTER_CRITICAL(&s_lock);
+    ++s_status.commands_accepted;
+    if (request->type == BLE_REQUEST_ENABLE) {
+        s_status.enabled = request->data.enabled;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (request_id != NULL) {
+        *request_id = request->request_id;
+    }
+    notify_ble_task();
+    return ESP_OK;
+}
+
+esp_err_t cuktech_ble_submit_command(const cuktech_control_command_t *command,
+                                     uint32_t *request_id)
+{
+    if (!cuktech_control_command_valid(command)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    portENTER_CRITICAL(&s_lock);
+    bool ready = s_status.enabled && s_status.authenticated;
+    portEXIT_CRITICAL(&s_lock);
+    if (!ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ble_request_t request = {
+        .type = BLE_REQUEST_CONTROL,
+        .request_id = allocate_request_id(),
+        .data.control = *command,
+    };
+    return enqueue_request(&request, request_id);
+}
+
+esp_err_t cuktech_ble_set_enabled(bool enabled, uint32_t *request_id)
+{
+    ble_request_t request = {
+        .type = BLE_REQUEST_ENABLE,
+        .request_id = allocate_request_id(),
+        .data.enabled = enabled,
+    };
+    return enqueue_request(&request, request_id);
+}
+
+static void record_request_result(uint32_t request_id, bool success,
+                                  const char *error)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_status.last_request_id = request_id;
+    if (success) {
+        ++s_status.commands_completed;
+    } else {
+        ++s_status.commands_failed;
+        if (error != NULL) {
+            snprintf(s_status.last_error, sizeof(s_status.last_error),
+                     "command:%s", error);
+        }
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -612,6 +720,9 @@ static cuktech_command_io_status_t receive_notification_for_handle(
     TickType_t started = xTaskGetTickCount();
     TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
     for (;;) {
+        if (!ble_runtime_enabled()) {
+            return CUKTECH_COMMAND_IO_DISCONNECTED;
+        }
         notify_event_t notification;
         if (pending_notification_take(expected_handle, &notification)) {
             if (notification.length > data_capacity) {
@@ -666,11 +777,16 @@ static cuktech_command_io_status_t receive_notification_for_handle(
     }
 }
 
-static bool wait_control_event(control_event_t *event, uint32_t timeout_ms)
+static bool wait_control_event_internal(control_event_t *event,
+                                        uint32_t timeout_ms,
+                                        bool cancel_when_disabled)
 {
     TickType_t started = xTaskGetTickCount();
     TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
     for (;;) {
+        if (cancel_when_disabled && !ble_runtime_enabled()) {
+            return false;
+        }
         if (s_control_overflow) {
             s_control_overflow = false;
             set_last_error_code("control_queue_overflow", 0);
@@ -685,6 +801,17 @@ static bool wait_control_event(control_event_t *event, uint32_t timeout_ms)
         }
         ulTaskNotifyTake(pdTRUE, timeout - elapsed);
     }
+}
+
+static bool wait_control_event(control_event_t *event, uint32_t timeout_ms)
+{
+    return wait_control_event_internal(event, timeout_ms, true);
+}
+
+static bool wait_control_event_unconditional(control_event_t *event,
+                                             uint32_t timeout_ms)
+{
+    return wait_control_event_internal(event, timeout_ms, false);
 }
 
 static void discard_queued_events(void)
@@ -743,6 +870,9 @@ static cuktech_miot_auth_io_status_t auth_transport_receive(
     TickType_t started = xTaskGetTickCount();
     TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
     for (;;) {
+        if (!ble_runtime_enabled()) {
+            return CUKTECH_MIOT_AUTH_IO_DISCONNECTED;
+        }
         notify_event_t notification;
         if (pending_notification_take(expected_handle, &notification)) {
             if (notification.length > data_capacity) {
@@ -1039,6 +1169,169 @@ static bool send_get_setting(uint16_t piid, uint32_t *decrypt_failures,
     return false;
 }
 
+static void clear_port_target(cuktech_port_target_t target)
+{
+    cuktech_port_state_t cleared = {
+        .protocol = CUKTECH_CHARGE_IDLE,
+    };
+    size_t first = target == CUKTECH_PORT_TARGET_ALL ? 0U : (size_t)target;
+    size_t end = target == CUKTECH_PORT_TARGET_ALL
+                     ? CHARGER_STATE_PORT_COUNT
+                     : first + 1U;
+    for (size_t index = first; index < end; ++index) {
+        charger_state_update_port((uint8_t)(index + 1U), &cleared);
+    }
+}
+
+static void clear_newly_disabled_ports(uint32_t previous_mask,
+                                       uint32_t new_mask)
+{
+    uint32_t disabled = previous_mask & ~new_mask & 0x0fU;
+    for (size_t index = 0U; index < CHARGER_STATE_PORT_COUNT; ++index) {
+        if ((disabled & (1UL << index)) != 0U) {
+            clear_port_target((cuktech_port_target_t)index);
+        }
+    }
+}
+
+static bool send_set_setting(uint16_t piid, uint32_t value,
+                             bool *session_stale)
+{
+    uint8_t plaintext[32];
+    size_t plaintext_len = 0U;
+    uint8_t sequence = s_session.miot_sequence++;
+    if (cuktech_miot_build_set(sequence, 2U, piid, value, plaintext,
+                               sizeof(plaintext), &plaintext_len) !=
+        CUKTECH_PROTOCOL_OK) {
+        return false;
+    }
+    charger_state_snapshot_t before;
+    charger_state_get_snapshot(&before);
+    cuktech_command_status_t status = cuktech_command_send(
+        &s_session, &COMMAND_TRANSPORT, plaintext, plaintext_len);
+    if (status == CUKTECH_COMMAND_COUNTER_EXHAUSTED ||
+        status == CUKTECH_COMMAND_DISCONNECTED) {
+        *session_stale = true;
+        return false;
+    }
+    if (status != CUKTECH_COMMAND_OK) {
+        ESP_LOGW(TAG, "SET PIID %u failed stage=%s", piid,
+                 cuktech_command_status_name(status));
+        return false;
+    }
+    if (!charger_state_update_setting(piid, value)) {
+        return false;
+    }
+    if (piid == 16U) {
+        uint32_t previous_mask =
+            before.setting_valid[16U] ? before.settings[16U] : 0x0fU;
+        clear_newly_disabled_ports(previous_mask, value);
+    }
+    ESP_LOGI(TAG, "SET PIID %u accepted value=%" PRIu32, piid, value);
+    return true;
+}
+
+static bool execute_control_request(const ble_request_t *request,
+                                    uint32_t *decrypt_failures,
+                                    bool *session_stale)
+{
+    const cuktech_control_command_t *command = &request->data.control;
+    if (command->type == CUKTECH_CONTROL_COMMAND_SET) {
+        return send_set_setting(command->data.set.piid,
+                                command->data.set.value, session_stale);
+    }
+
+    if (!send_get_setting(16U, decrypt_failures, session_stale)) {
+        return false;
+    }
+    charger_state_snapshot_t snapshot;
+    charger_state_get_snapshot(&snapshot);
+    if (!snapshot.setting_valid[16U]) {
+        return false;
+    }
+    uint32_t new_mask = 0U;
+    if (!cuktech_control_apply_port_mask(
+            snapshot.settings[16U], command->data.port.target,
+            command->data.port.enabled, &new_mask)) {
+        return false;
+    }
+    if (new_mask != snapshot.settings[16U] &&
+        !send_set_setting(16U, new_mask, session_stale)) {
+        return false;
+    }
+    if (!command->data.port.enabled) {
+        clear_port_target(command->data.port.target);
+    }
+    ESP_LOGI(TAG, "port control target=%s action=%s mask=0x%02" PRIx32,
+             cuktech_port_target_name(command->data.port.target),
+             command->data.port.enabled ? "on" : "off", new_mask);
+    return true;
+}
+
+static bool process_authenticated_requests(uint32_t *decrypt_failures,
+                                           bool *session_stale)
+{
+    ble_request_t request;
+    while (xQueueReceive(s_request_queue, &request, 0) == pdTRUE) {
+        if (request.type == BLE_REQUEST_ENABLE) {
+            portENTER_CRITICAL(&s_lock);
+            s_status.enabled = request.data.enabled;
+            portEXIT_CRITICAL(&s_lock);
+            record_request_result(request.request_id, true, NULL);
+            if (!request.data.enabled) {
+                clear_port_target(CUKTECH_PORT_TARGET_ALL);
+                ESP_LOGI(TAG, "BLE runtime disable request accepted id=%" PRIu32,
+                         request.request_id);
+                return false;
+            }
+            continue;
+        }
+        if (!ble_runtime_enabled()) {
+            record_request_result(request.request_id, false, "disabled");
+            continue;
+        }
+        bool success = execute_control_request(&request, decrypt_failures,
+                                               session_stale);
+        record_request_result(
+            request.request_id, success,
+            success ? NULL : (*session_stale ? "session_stale" : "failed"));
+        if (*session_stale) {
+            return false;
+        }
+    }
+    return ble_runtime_enabled();
+}
+
+static bool process_pre_session_requests(void)
+{
+    ble_request_t request;
+    while (xQueueReceive(s_request_queue, &request, 0) == pdTRUE) {
+        if (request.type == BLE_REQUEST_ENABLE) {
+            portENTER_CRITICAL(&s_lock);
+            s_status.enabled = request.data.enabled;
+            portEXIT_CRITICAL(&s_lock);
+            record_request_result(request.request_id, true, NULL);
+        } else {
+            record_request_result(request.request_id, false,
+                                  "not_authenticated");
+        }
+    }
+    return ble_runtime_enabled();
+}
+
+static void wait_while_disabled(void)
+{
+    for (;;) {
+        (void)process_pre_session_requests();
+        if (ble_runtime_enabled()) {
+            return;
+        }
+        charger_state_set_connection(false, false);
+        update_status(CUKTECH_BLE_STATE_DISABLED, false, false, 0U, 0U, "");
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
+}
+
 static bool refresh_settings(uint32_t *decrypt_failures)
 {
     size_t failures = 0U;
@@ -1047,6 +1340,9 @@ static bool refresh_settings(uint32_t *decrypt_failures)
          index < sizeof(READABLE_SETTINGS_PIIDS) /
                      sizeof(READABLE_SETTINGS_PIIDS[0]);
          ++index) {
+        if (!ble_runtime_enabled()) {
+            return false;
+        }
         if (!send_get_setting(READABLE_SETTINGS_PIIDS[index],
                               decrypt_failures, &session_stale)) {
             ++failures;
@@ -1103,20 +1399,28 @@ static bool run_authenticated_session(void)
     uint32_t decrypt_failures = 0U;
     if (!drain_initial_pushes(&decrypt_failures) ||
         !refresh_settings(&decrypt_failures)) {
-        update_status(CUKTECH_BLE_STATE_ERROR,
-                      s_conn_handle != BLE_HS_CONN_HANDLE_NONE, true, 0U, 0U,
-                      decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT
-                          ? "session_stale_decrypt"
-                          : "command_channel_failed");
+        if (ble_runtime_enabled()) {
+            update_status(CUKTECH_BLE_STATE_ERROR,
+                          s_conn_handle != BLE_HS_CONN_HANDLE_NONE, true, 0U,
+                          0U,
+                          decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT
+                              ? "session_stale_decrypt"
+                              : "command_channel_failed");
+        }
         return false;
     }
 
     TickType_t last_refresh = xTaskGetTickCount();
     while (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        bool session_stale = false;
+        if (!process_authenticated_requests(&decrypt_failures,
+                                            &session_stale)) {
+            return false;
+        }
         uint8_t plaintext[CUKTECH_COMMAND_PLAINTEXT_MAX];
         size_t plaintext_len = 0U;
         cuktech_command_status_t status = receive_and_process_plaintext(
-            plaintext, sizeof(plaintext), &plaintext_len, 2000U,
+            plaintext, sizeof(plaintext), &plaintext_len, 1000U,
             &decrypt_failures);
         if (status == CUKTECH_COMMAND_OK) {
             (void)process_miot_plaintext(plaintext, plaintext_len);
@@ -1135,8 +1439,10 @@ static bool run_authenticated_session(void)
         if ((xTaskGetTickCount() - last_refresh) * portTICK_PERIOD_MS >=
             BLE_SETTINGS_REFRESH_MS) {
             if (!refresh_settings(&decrypt_failures)) {
-                update_status(CUKTECH_BLE_STATE_ERROR, true, true, 0U, 0U,
-                              "settings_refresh_failed");
+                if (ble_runtime_enabled()) {
+                    update_status(CUKTECH_BLE_STATE_ERROR, true, true, 0U,
+                                  0U, "settings_refresh_failed");
+                }
                 return false;
             }
             last_refresh = xTaskGetTickCount();
@@ -1178,7 +1484,7 @@ static bool wait_for_host_sync(void)
     while (xTaskGetTickCount() - started < timeout) {
         uint32_t remaining = (uint32_t)((timeout - (xTaskGetTickCount() - started)) *
                                         portTICK_PERIOD_MS);
-        if (!wait_control_event(&event, remaining)) {
+        if (!wait_control_event_unconditional(&event, remaining)) {
             break;
         }
         if (event.type == CONTROL_EVENT_HOST_SYNC) {
@@ -1299,12 +1605,18 @@ static bool scan_then_connect(void)
     if (cancel_rc != 0 && cancel_rc != BLE_HS_EALREADY) {
         ESP_LOGW(TAG, "scan cleanup failed rc=%d", cancel_rc);
     }
+    if (!ble_runtime_enabled()) {
+        return false;
+    }
     ESP_LOGI(TAG, "charger not advertising; trying bounded direct connections");
     ble_addr_t direct = s_target_address;
     direct.type = BLE_ADDR_PUBLIC;
     discard_queued_events();
     if (connect_to_address(&direct)) {
         return true;
+    }
+    if (!ble_runtime_enabled()) {
+        return false;
     }
     discard_queued_events();
     direct.type = BLE_ADDR_RANDOM;
@@ -1733,7 +2045,7 @@ static void disable_notifications_best_effort(void)
             uint32_t remaining =
                 (uint32_t)((timeout - (xTaskGetTickCount() - started)) *
                            portTICK_PERIOD_MS);
-            if (!wait_control_event(&event, remaining)) {
+            if (!wait_control_event_unconditional(&event, remaining)) {
                 break;
             }
             if (event.type == CONTROL_EVENT_WRITE_DONE &&
@@ -1786,7 +2098,7 @@ static void disconnect_cleanly(void)
             uint32_t remaining =
                 (uint32_t)((timeout - (xTaskGetTickCount() - started)) *
                            portTICK_PERIOD_MS);
-            if (!wait_control_event(&event, remaining)) {
+            if (!wait_control_event_unconditional(&event, remaining)) {
                 break;
             }
             if (event.type == CONTROL_EVENT_DISCONNECTED &&
@@ -1807,7 +2119,16 @@ static void retry_delay(uint32_t seconds)
 {
     update_status(CUKTECH_BLE_STATE_BACKOFF, false, false, 0U, seconds, NULL);
     ESP_LOGI(TAG, "BLE retry in %" PRIu32 " seconds", seconds);
-    vTaskDelay(pdMS_TO_TICKS(seconds * 1000U));
+    TickType_t started = xTaskGetTickCount();
+    TickType_t delay = pdMS_TO_TICKS(seconds * 1000U);
+    while (ble_runtime_enabled()) {
+        TickType_t elapsed = xTaskGetTickCount() - started;
+        if (elapsed >= delay) {
+            break;
+        }
+        ulTaskNotifyTake(pdTRUE, delay - elapsed);
+        (void)process_pre_session_requests();
+    }
 }
 
 static void ble_application_task(void *argument)
@@ -1821,9 +2142,24 @@ static void ble_application_task(void *argument)
     uint32_t backoff = 0U;
     uint32_t authentication_failures = 0U;
     for (;;) {
+        wait_while_disabled();
         bool authentication_failed = false;
         discard_queued_events();
-        if (scan_then_connect() && prepare_gatt_link()) {
+        bool link_ready = scan_then_connect();
+        if (!ble_runtime_enabled()) {
+            disconnect_cleanly();
+            authentication_failures = 0U;
+            backoff = 0U;
+            continue;
+        }
+        link_ready = link_ready && prepare_gatt_link();
+        if (!ble_runtime_enabled()) {
+            disconnect_cleanly();
+            authentication_failures = 0U;
+            backoff = 0U;
+            continue;
+        }
+        if (link_ready) {
             read_and_store_device_info();
             cuktech_miot_auth_status_t auth_status =
                 authenticate_link(authentication_failures);
@@ -1848,13 +2184,22 @@ static void ble_application_task(void *argument)
                              "MiOT authentication locked after %" PRIu32
                              " consecutive failures; reboot or manual retry required",
                              authentication_failures);
-                    for (;;) {
-                        vTaskDelay(pdMS_TO_TICKS(1000U));
+                    while (ble_runtime_enabled()) {
+                        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000U));
+                        (void)process_pre_session_requests();
                     }
+                    authentication_failures = 0U;
+                    backoff = 0U;
+                    continue;
                 }
             }
         } else {
             disconnect_cleanly();
+        }
+        if (!ble_runtime_enabled()) {
+            authentication_failures = 0U;
+            backoff = 0U;
+            continue;
         }
         backoff = cuktech_ble_next_backoff(backoff, BLE_RETRY_MAX_SECONDS);
         if (authentication_failed && backoff < BLE_AUTH_MIN_RETRY_SECONDS) {
@@ -1882,18 +2227,19 @@ esp_err_t cuktech_ble_start(const app_config_t *config)
     }
     memset(&s_status, 0, sizeof(s_status));
     s_status.enabled = config->ble_enabled;
-    if (!config->ble_enabled) {
-        s_status.state = CUKTECH_BLE_STATE_DISABLED;
-        ESP_LOGI(TAG, "BLE disabled by configuration");
-        return ESP_OK;
-    }
     uint8_t display_order[6];
     if (!config->token_configured ||
         !cuktech_ble_parse_mac(config->charger_mac, display_order)) {
-        s_status.state = CUKTECH_BLE_STATE_WAITING_CONFIG;
-        snprintf(s_status.last_error, sizeof(s_status.last_error),
-                 "charger_mac_and_token_required");
-        ESP_LOGW(TAG, "BLE waiting for a valid charger MAC and Token");
+        s_status.state = config->ble_enabled
+                             ? CUKTECH_BLE_STATE_WAITING_CONFIG
+                             : CUKTECH_BLE_STATE_DISABLED;
+        if (config->ble_enabled) {
+            snprintf(s_status.last_error, sizeof(s_status.last_error),
+                     "charger_mac_and_token_required");
+            ESP_LOGW(TAG, "BLE waiting for a valid charger MAC and Token");
+        } else {
+            ESP_LOGI(TAG, "BLE disabled; charger credentials not loaded");
+        }
         return ESP_OK;
     }
     s_target_address.type = BLE_ADDR_PUBLIC;
@@ -1911,7 +2257,10 @@ esp_err_t cuktech_ble_start(const app_config_t *config)
                                    sizeof(control_event_t));
     s_notify_queue = xQueueCreate(BLE_NOTIFY_QUEUE_DEPTH,
                                   sizeof(notify_event_t));
-    if (s_control_queue == NULL || s_notify_queue == NULL) {
+    s_request_queue = xQueueCreate(BLE_REQUEST_QUEUE_DEPTH,
+                                   sizeof(ble_request_t));
+    if (s_control_queue == NULL || s_notify_queue == NULL ||
+        s_request_queue == NULL) {
         if (s_control_queue != NULL) {
             vQueueDelete(s_control_queue);
             s_control_queue = NULL;
@@ -1919,6 +2268,10 @@ esp_err_t cuktech_ble_start(const app_config_t *config)
         if (s_notify_queue != NULL) {
             vQueueDelete(s_notify_queue);
             s_notify_queue = NULL;
+        }
+        if (s_request_queue != NULL) {
+            vQueueDelete(s_request_queue);
+            s_request_queue = NULL;
         }
         nimble_port_deinit();
         s_status.state = CUKTECH_BLE_STATE_ERROR;
@@ -1932,8 +2285,10 @@ esp_err_t cuktech_ble_start(const app_config_t *config)
                     NULL, BLE_APP_TASK_PRIORITY, &s_ble_task) != pdPASS) {
         vQueueDelete(s_notify_queue);
         vQueueDelete(s_control_queue);
+        vQueueDelete(s_request_queue);
         s_notify_queue = NULL;
         s_control_queue = NULL;
+        s_request_queue = NULL;
         nimble_port_deinit();
         s_status.state = CUKTECH_BLE_STATE_ERROR;
         snprintf(s_status.last_error, sizeof(s_status.last_error),
@@ -1941,9 +2296,11 @@ esp_err_t cuktech_ble_start(const app_config_t *config)
         return ESP_ERR_NO_MEM;
     }
     s_started = true;
-    update_status(CUKTECH_BLE_STATE_HOST_SYNC, false, false, 0U, 0U, "");
+    update_status(config->ble_enabled ? CUKTECH_BLE_STATE_HOST_SYNC
+                                      : CUKTECH_BLE_STATE_DISABLED,
+                  false, false, 0U, 0U, "");
     nimble_port_freertos_init(nimble_host_task);
-    ESP_LOGI(TAG, "NimBLE Central started for charger MAC %s",
-             config->charger_mac);
+    ESP_LOGI(TAG, "NimBLE Central started for charger MAC %s enabled=%s",
+             config->charger_mac, config->ble_enabled ? "yes" : "no");
     return ESP_OK;
 }

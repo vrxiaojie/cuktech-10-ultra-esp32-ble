@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "app_config_core.h"
+#include "cuktech_control.h"
 #include "esp_err.h"
 
 #define CUKTECH_BLE_LAST_ERROR_MAX_LEN 63U
@@ -40,9 +41,16 @@ typedef struct {
     uint32_t notifications_dropped;
     uint32_t retry_delay_seconds;
     uint32_t authentication_failures;
+    uint32_t commands_accepted;
+    uint32_t commands_completed;
+    uint32_t commands_failed;
+    uint32_t last_request_id;
     char last_error[CUKTECH_BLE_LAST_ERROR_MAX_LEN + 1U];
 } cuktech_ble_status_t;
 
 esp_err_t cuktech_ble_start(const app_config_t *config);
 void cuktech_ble_get_status(cuktech_ble_status_t *status);
 const char *cuktech_ble_state_name(cuktech_ble_state_t state);
+esp_err_t cuktech_ble_submit_command(const cuktech_control_command_t *command,
+                                     uint32_t *request_id);
+esp_err_t cuktech_ble_set_enabled(bool enabled, uint32_t *request_id);

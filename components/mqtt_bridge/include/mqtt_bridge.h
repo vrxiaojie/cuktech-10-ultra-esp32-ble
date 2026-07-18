@@ -23,6 +23,9 @@ typedef struct {
     bool connected;
     uint32_t reconnects;
     uint32_t publish_failures;
+    uint32_t commands_received;
+    uint32_t commands_accepted;
+    uint32_t commands_rejected;
     char last_error[MQTT_BRIDGE_LAST_ERROR_MAX_LEN + 1U];
 } mqtt_bridge_status_t;
 

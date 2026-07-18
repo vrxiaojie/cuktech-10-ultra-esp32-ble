@@ -27,6 +27,19 @@ target_compile_features(cuktech_ble_core_tests PRIVATE c_std_17)
 target_compile_options(cuktech_ble_core_tests PRIVATE -Wall -Wextra -Werror)
 add_test(NAME cuktech_ble_core_tests COMMAND cuktech_ble_core_tests)
 
+add_executable(control_tests
+    test_control.c
+    ../../components/cuktech_ble/cuktech_control.c
+    ../../components/cuktech_protocol/miot_tlv.c
+)
+target_include_directories(control_tests PRIVATE
+    ../../components/cuktech_ble/include
+    ../../components/cuktech_protocol/include
+)
+target_compile_features(control_tests PRIVATE c_std_17)
+target_compile_options(control_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME control_tests COMMAND control_tests)
+
 add_executable(charger_state_tests
     test_charger_state.c
     ../../components/charger_state/charger_state_core.c
@@ -61,6 +74,23 @@ if(NOT IDF_PATH AND DEFINED ENV{IDF_PATH})
 endif()
 
 if(IDF_PATH AND EXISTS "${IDF_PATH}/components/json/cJSON/cJSON.c")
+    add_executable(mqtt_control_tests
+        test_mqtt_control.c
+        ../../components/mqtt_bridge/mqtt_bridge_control.c
+        ../../components/cuktech_ble/cuktech_control.c
+        ../../components/cuktech_protocol/miot_tlv.c
+        ${IDF_PATH}/components/json/cJSON/cJSON.c
+    )
+    target_include_directories(mqtt_control_tests PRIVATE
+        ../../components/mqtt_bridge/include
+        ../../components/cuktech_ble/include
+        ../../components/cuktech_protocol/include
+        ${IDF_PATH}/components/json/cJSON
+    )
+    target_compile_features(mqtt_control_tests PRIVATE c_std_17)
+    target_compile_options(mqtt_control_tests PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME mqtt_control_tests COMMAND mqtt_control_tests)
+
     add_executable(web_config_tests
         test_web_config.c
         ../../components/app_config/app_config_core.c

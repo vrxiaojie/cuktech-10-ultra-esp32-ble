@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "cuktech_ble.c"
         "cuktech_ble_core.c"
+        "cuktech_control.c"
         "cuktech_command.c"
         "cuktech_miot_auth.c"
     INCLUDE_DIRS "include"
