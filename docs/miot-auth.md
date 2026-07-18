@@ -32,7 +32,7 @@ ESP32-C3 与充电器之间不执行 BLE Pairing/Bonding。Token 是 12 字节�
 - 任何失败都清零随机数、HMAC 临时缓冲和会话 Key/IV。
 - 断开前尽力关闭所有已启用 CCCD（当前为四个认证/命令通道和一个设备信息通道），再终止连接并清空 Notify 队列。
 - 认证失败重试间隔不少于 3 秒，随后沿用最大 300 秒的指数退避。
-- 连续 5 次协议认证失败进入 `auth_failed_locked`，避免持续轰击充电器；当前可通过重启解除，后续 Web 手动重试接口将复用该状态。
+- 连续 5 次协议认证失败进入 `auth_failed_locked`，避免持续轰击充电器。STA 管理页或 `POST /api/retry-ble` 可清零失败计数并立即重新尝试；接口只在锁定状态接受，不修改凭据。
 - 纯链路断开或传输内部错误不累计为 Token 认证失败。
 
 `GET /api/status` 的 `authenticated` 已改为真实运行状态。`last_error` 只返回例如 `auth:device_hmac_mismatch` 的阶段名，不返回通知内容或 Secret。

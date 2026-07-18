@@ -175,3 +175,18 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - 真机 MQTT 控制、PIID 写入、端口开关、运行时启停和 HA 联动：当前未发现串口，尚未完成
 
 详细调用链和证据等级见 [Home Assistant 控制](ha-control.md)。
+
+## 阶段 11 验证
+
+- `idf.py build`：通过，ESP-IDF 5.5.2，目标 `esp32c3`
+- 固件镜像：`0xfa610`，默认 1 MiB app 分区剩余 `0x59f0`（约 2%），未修改分区表
+- 主机测试：10/10 通过；ASan/UBSan 10/10 通过，受控环境不支持 LeakSanitizer，关闭 leak 检测
+- 认证锁定：连续 5 次计数型失败进入 `auth_failed_locked`；`POST /api/retry-ble` 只在锁定状态接受并立即重试
+- 长时间计数：request ID 到 `UINT32_MAX` 后跳过 0 回到 1；指数退避连续 100000 次计算仍稳定封顶 300 秒
+- 会话恢复：连续 10 次 AES-CCM 解密失败使用统一阈值判定并触发重连；禁用可中断扫描、连接、GATT、认证、命令和退避等待
+- Wi-Fi/MQTT 隔离：STA 失败约 60 秒开启保留配置的回退 AP；Broker 不可达不触发配网，也不停止 BLE
+- Secret 审计：日志只输出 `*_configured` 布尔状态；HTTP/MQTT 不返回 Secret；认证临时随机数/HMAC 和会话材料在退出路径清零
+- 传输边界：HTTP 与 MQTT 仍为可信局域网明文协议；NVS Blob 默认不等同于加密存储，未启用 Flash/NVS encryption 时不能抵抗物理 Flash 读取
+- 长时间真机运行、反复断网/断 Broker/断 BLE、电源循环、认证锁定恢复和堆内存趋势：当前未发现串口，尚未完成
+
+详细恢复策略和安全边界见 [韧性与安全](resilience-security.md)。

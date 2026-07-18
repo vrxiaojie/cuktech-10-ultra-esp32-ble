@@ -1,5 +1,6 @@
 #include "cuktech_ble_core.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -47,12 +48,28 @@ static void test_bounded_backoff(void)
     }
     CHECK(cuktech_ble_next_backoff(0U, 0U) == 0U);
     CHECK(cuktech_ble_next_backoff(200U, 300U) == 300U);
+    for (size_t index = 0U; index < 100000U; ++index) {
+        delay = cuktech_ble_next_backoff(delay, 300U);
+    }
+    CHECK(delay == 300U);
+}
+
+static void test_long_running_counters_and_failure_limits(void)
+{
+    CHECK(cuktech_ble_next_request_id(0U) == 1U);
+    CHECK(cuktech_ble_next_request_id(UINT32_MAX - 1U) == UINT32_MAX);
+    CHECK(cuktech_ble_next_request_id(UINT32_MAX) == 1U);
+    CHECK(!cuktech_ble_failure_limit_reached(4U, 5U));
+    CHECK(cuktech_ble_failure_limit_reached(5U, 5U));
+    CHECK(cuktech_ble_failure_limit_reached(10U, 10U));
+    CHECK(!cuktech_ble_failure_limit_reached(UINT32_MAX, 0U));
 }
 
 int main(void)
 {
     test_mac_parsing_and_nimble_layout();
     test_bounded_backoff();
+    test_long_running_counters_and_failure_limits();
     if (failures != 0) {
         fprintf(stderr, "%d checks failed\n", failures);
         return 1;
