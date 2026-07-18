@@ -66,3 +66,15 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - 真机 SoftAP、DHCP、HTTP、APSTA 验证、重启和 60 秒回退：待串口设备可见后验证
 
 本阶段未加入 mDNS。ESP-IDF 5.5.2 源码树不含高层 `mdns` 组件；若采用 Espressif Component Registry 的托管组件，需要先评估依赖、许可证和固件成本。
+
+## 阶段 04 验证
+
+- `idf.py build`：通过
+- 主机测试：2/2 通过（配置模型与 Web 配置模型）
+- ASan/UBSan：通过；当前受控环境不支持 LeakSanitizer，测试时关闭 leak 检测
+- `GET /api/status`：包含现有 HA 健康检查要求的兼容字段
+- `GET /api/config`：只包含公开字段和 `*_configured`，不包含任何 Secret 值
+- `POST /api/config`：覆盖请求上限、非法 JSON、空对象、错误类型、非法十六进制、非法 topic 和 Secret 保持/清除
+- SoftAP 限制：管理配置 GET/POST 只在 `sta_connected` 状态开放
+- 固件镜像：约 869 KiB，默认 1 MiB 应用分区剩余约 15%
+- 真机 HTTP 页面、NVS 保存后重启和局域网访问：待烧录验证
