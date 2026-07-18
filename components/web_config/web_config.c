@@ -1,5 +1,6 @@
 #include "web_config.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -323,10 +324,24 @@ static esp_err_t status_handler(httpd_req_t *request)
     cJSON_AddNumberToObject(root, "ble_mtu", ble_status.mtu);
     cJSON_AddNumberToObject(root, "ble_notify_dropped",
                            ble_status.notifications_dropped);
+    cJSON_AddNumberToObject(root, "ble_commands_accepted",
+                           ble_status.commands_accepted);
+    cJSON_AddNumberToObject(root, "ble_commands_completed",
+                           ble_status.commands_completed);
+    cJSON_AddNumberToObject(root, "ble_commands_failed",
+                           ble_status.commands_failed);
+    cJSON_AddNumberToObject(root, "ble_last_request_id",
+                           ble_status.last_request_id);
     cJSON_AddNumberToObject(root, "mqtt_reconnects",
                            mqtt_status.reconnects);
     cJSON_AddNumberToObject(root, "mqtt_publish_failures",
                            mqtt_status.publish_failures);
+    cJSON_AddNumberToObject(root, "mqtt_commands_received",
+                           mqtt_status.commands_received);
+    cJSON_AddNumberToObject(root, "mqtt_commands_accepted",
+                           mqtt_status.commands_accepted);
+    cJSON_AddNumberToObject(root, "mqtt_commands_rejected",
+                           mqtt_status.commands_rejected);
     cJSON_AddStringToObject(root, "last_error", ble_status.last_error);
     cJSON_AddNumberToObject(root, "free_heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(root, "state_revision", state.revision);
@@ -404,6 +419,75 @@ static esp_err_t config_post_handler(httpd_req_t *request)
     return response_error;
 }
 
+static esp_err_t enable_post_handler(httpd_req_t *request)
+{
+    if (!management_allowed()) {
+        return send_json(request, "403 Forbidden",
+                         "{\"ok\":false,\"error\":\"sta_required\"}");
+    }
+    char body[WEB_CONFIG_MAX_BODY_SIZE + 1U] = {0};
+    if (receive_body(request, body, sizeof(body)) != ESP_OK) {
+        return send_json(request, "413 Payload Too Large",
+                         "{\"ok\":false,\"error\":\"invalid_body\"}");
+    }
+    cJSON *root = cJSON_Parse(body);
+    secure_zero(body, sizeof(body));
+    const cJSON *enabled_item = root == NULL
+                                    ? NULL
+                                    : cJSON_GetObjectItemCaseSensitive(
+                                          root, "enabled");
+    if (!cJSON_IsBool(enabled_item)) {
+        cJSON_Delete(root);
+        return send_json(request, "400 Bad Request",
+                         "{\"ok\":false,\"error\":\"enabled_required\"}");
+    }
+    bool enabled = cJSON_IsTrue(enabled_item);
+    cJSON_Delete(root);
+
+    app_config_t previous;
+    bool found = false;
+    esp_err_t error = app_config_load(&previous, &found);
+    if (error != ESP_OK) {
+        return send_json(request, "500 Internal Server Error",
+                         "{\"ok\":false,\"error\":\"config_load_failed\"}");
+    }
+    (void)found;
+    app_config_t candidate = previous;
+    candidate.ble_enabled = enabled;
+    if (candidate.ble_enabled != previous.ble_enabled) {
+        error = app_config_save(&candidate);
+        if (error != ESP_OK) {
+            return send_json(
+                request, "500 Internal Server Error",
+                "{\"ok\":false,\"error\":\"config_save_failed\"}");
+        }
+    }
+
+    cuktech_ble_status_t ble_status;
+    cuktech_ble_get_status(&ble_status);
+    uint32_t request_id = 0U;
+    if (ble_status.enabled != enabled) {
+        error = cuktech_ble_set_enabled(enabled, &request_id);
+        if (error != ESP_OK) {
+            if (candidate.ble_enabled != previous.ble_enabled) {
+                esp_err_t rollback_error = app_config_save(&previous);
+                if (rollback_error != ESP_OK) {
+                    ESP_LOGE(TAG, "BLE enable config rollback failed: %s",
+                             esp_err_to_name(rollback_error));
+                }
+            }
+            return send_json(
+                request, "409 Conflict",
+                "{\"ok\":false,\"error\":\"ble_runtime_unavailable\"}");
+        }
+    }
+    char response[96];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"enabled\":%s,\"request_id\":%" PRIu32 "}",
+             enabled ? "true" : "false", request_id);
+    return send_json(request, "200 OK", response);
+}
+
 static esp_err_t captive_redirect_handler(httpd_req_t *request)
 {
     httpd_resp_set_status(request, "302 Found");
@@ -418,7 +502,7 @@ esp_err_t web_config_start(void)
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 9;
     config.recv_wait_timeout = CONFIG_CUKTECH_WIFI_VERIFY_SECONDS + 5;
     config.send_wait_timeout = 10;
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &config), TAG, "HTTP server start failed");
@@ -437,6 +521,8 @@ esp_err_t web_config_start(void)
         .uri = "/api/config", .method = HTTP_GET, .handler = config_get_handler};
     const httpd_uri_t config_post = {
         .uri = "/api/config", .method = HTTP_POST, .handler = config_post_handler};
+    const httpd_uri_t enable_post = {
+        .uri = "/api/enable", .method = HTTP_POST, .handler = enable_post_handler};
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &root), TAG,
                         "register root failed");
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &provision), TAG,
@@ -451,6 +537,8 @@ esp_err_t web_config_start(void)
                         "register config GET failed");
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &config_post), TAG,
                         "register config POST failed");
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &enable_post), TAG,
+                        "register enable POST failed");
     ESP_LOGI(TAG, "HTTP configuration server started");
     return ESP_OK;
 }

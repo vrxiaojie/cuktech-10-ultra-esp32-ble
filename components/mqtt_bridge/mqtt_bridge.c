@@ -1,18 +1,22 @@
 #include "mqtt_bridge.h"
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "charger_state.h"
+#include "cuktech_ble.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mqtt_bridge_model.h"
+#include "mqtt_bridge_control.h"
 #include "mqtt_client.h"
 
 #define MQTT_BRIDGE_TASK_STACK_SIZE 4096U
 #define MQTT_BRIDGE_TASK_PRIORITY 4U
 #define MQTT_BRIDGE_POLL_MS 500U
+#define MQTT_BRIDGE_CONTROL_PAYLOAD_MAX_LEN 256U
 
 typedef struct {
     char host[APP_CONFIG_MQTT_HOST_MAX_LEN + 1U];
@@ -39,6 +43,8 @@ static mqtt_bridge_status_t s_status = {
 static char s_topic_ports[CHARGER_STATE_PORT_COUNT][MQTT_BRIDGE_TOPIC_MAX_LEN + 1U];
 static char s_topic_settings[MQTT_BRIDGE_TOPIC_MAX_LEN + 1U];
 static char s_topic_status[MQTT_BRIDGE_TOPIC_MAX_LEN + 1U];
+static char s_topic_set[MQTT_BRIDGE_TOPIC_MAX_LEN + 1U];
+static char s_topic_port_control[MQTT_BRIDGE_TOPIC_MAX_LEN + 1U];
 static bool s_force_full_snapshot;
 static bool s_started;
 
@@ -91,6 +97,22 @@ static void record_publish_failure(const char *stage)
     ++s_status.publish_failures;
     snprintf(s_status.last_error, sizeof(s_status.last_error), "publish:%s",
              stage);
+    portEXIT_CRITICAL(&s_lock);
+}
+
+static void record_control_result(bool accepted, const char *error)
+{
+    portENTER_CRITICAL(&s_lock);
+    ++s_status.commands_received;
+    if (accepted) {
+        ++s_status.commands_accepted;
+    } else {
+        ++s_status.commands_rejected;
+        if (error != NULL) {
+            snprintf(s_status.last_error, sizeof(s_status.last_error),
+                     "control:%s", error);
+        }
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -207,6 +229,77 @@ static void publish_task(void *argument)
     }
 }
 
+static bool topic_equals(const esp_mqtt_event_handle_t event,
+                         const char *topic)
+{
+    size_t topic_len = strlen(topic);
+    return event != NULL && event->topic != NULL && event->topic_len >= 0 &&
+           (size_t)event->topic_len == topic_len &&
+           memcmp(event->topic, topic, topic_len) == 0;
+}
+
+static void subscribe_control_topics(void)
+{
+    int set_id = esp_mqtt_client_subscribe(s_client, s_topic_set, 1);
+    int port_id =
+        esp_mqtt_client_subscribe(s_client, s_topic_port_control, 1);
+    if (set_id < 0 || port_id < 0) {
+        update_status(MQTT_BRIDGE_STATE_CONNECTED, true,
+                      "control_subscribe_failed");
+        ESP_LOGW(TAG, "MQTT control topic subscription failed");
+        return;
+    }
+    ESP_LOGI(TAG, "MQTT control subscriptions ready");
+}
+
+static void handle_control_message(esp_mqtt_event_handle_t event)
+{
+    bool is_set = topic_equals(event, s_topic_set);
+    bool is_port = topic_equals(event, s_topic_port_control);
+    if (!is_set && !is_port) {
+        return;
+    }
+    if (event->data == NULL || event->total_data_len <= 0 ||
+        event->total_data_len > MQTT_BRIDGE_CONTROL_PAYLOAD_MAX_LEN ||
+        event->current_data_offset != 0 ||
+        event->data_len != event->total_data_len) {
+        record_control_result(false, "invalid_length");
+        ESP_LOGW(TAG, "MQTT control rejected: fragmented or oversized payload");
+        return;
+    }
+    cuktech_control_command_t command;
+    mqtt_bridge_control_status_t parse_status =
+        is_set ? mqtt_bridge_parse_set_command(
+                     event->data, (size_t)event->data_len, &command)
+               : mqtt_bridge_parse_port_command(
+                     event->data, (size_t)event->data_len, &command);
+    if (parse_status != MQTT_BRIDGE_CONTROL_OK) {
+        record_control_result(false,
+                              mqtt_bridge_control_status_name(parse_status));
+        ESP_LOGW(TAG, "MQTT control rejected stage=%s",
+                 mqtt_bridge_control_status_name(parse_status));
+        return;
+    }
+    uint32_t request_id = 0U;
+    esp_err_t error = cuktech_ble_submit_command(&command, &request_id);
+    if (error != ESP_OK) {
+        record_control_result(false, esp_err_to_name(error));
+        ESP_LOGW(TAG, "MQTT control enqueue failed error=%s",
+                 esp_err_to_name(error));
+        return;
+    }
+    record_control_result(true, NULL);
+    if (command.type == CUKTECH_CONTROL_COMMAND_SET) {
+        ESP_LOGI(TAG, "MQTT SET queued id=%" PRIu32 " piid=%u value=%" PRIu32,
+                 request_id, command.data.set.piid, command.data.set.value);
+    } else {
+        ESP_LOGI(TAG, "MQTT port queued id=%" PRIu32 " target=%s action=%s",
+                 request_id,
+                 cuktech_port_target_name(command.data.port.target),
+                 command.data.port.enabled ? "on" : "off");
+    }
+}
+
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
                                int32_t event_id, void *event_data)
 {
@@ -225,9 +318,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
         s_force_full_snapshot = true;
         portEXIT_CRITICAL(&s_lock);
         ESP_LOGI(TAG, "MQTT connected; scheduling full retained snapshot");
+        subscribe_control_topics();
         if (s_publish_task != NULL) {
             xTaskNotifyGive(s_publish_task);
         }
+        break;
+    case MQTT_EVENT_DATA:
+        handle_control_message(event);
         break;
     case MQTT_EVENT_DISCONNECTED:
         update_status(MQTT_BRIDGE_STATE_DISCONNECTED, false,
@@ -267,7 +364,12 @@ static bool build_topics(void)
                                    s_topic_settings,
                                    sizeof(s_topic_settings)) &&
            mqtt_bridge_build_topic(s_config.topic_prefix, "status",
-                                   s_topic_status, sizeof(s_topic_status));
+                                   s_topic_status, sizeof(s_topic_status)) &&
+           mqtt_bridge_build_topic(s_config.topic_prefix, "set", s_topic_set,
+                                   sizeof(s_topic_set)) &&
+           mqtt_bridge_build_topic(s_config.topic_prefix, "port",
+                                   s_topic_port_control,
+                                   sizeof(s_topic_port_control));
 }
 
 esp_err_t mqtt_bridge_start(const app_config_t *config)
