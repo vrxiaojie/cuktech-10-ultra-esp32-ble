@@ -6,6 +6,8 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "web_config.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "app";
 
@@ -42,5 +44,16 @@ void app_orchestrator_start(void)
                  config.mqtt_password_configured ? "yes" : "no",
                  config.ble_enabled ? "yes" : "no");
     }
-    ESP_LOGI(TAG, "orchestrator ready; services will start in later stages");
+    error = wifi_manager_start(&config);
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi manager start failed: %s", esp_err_to_name(error));
+        return;
+    }
+    error = web_config_start();
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "provisioning HTTP server start failed: %s", esp_err_to_name(error));
+        return;
+    }
+    ESP_LOGI(TAG, "orchestrator ready: wifi_state=%s",
+             wifi_manager_state_name(wifi_manager_get_state()));
 }
