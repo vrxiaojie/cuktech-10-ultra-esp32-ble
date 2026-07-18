@@ -1,6 +1,7 @@
 #include "cuktech_ble_core.h"
 
 #include <stddef.h>
+#include <string.h>
 
 static int hex_value(char value)
 {
@@ -18,7 +19,7 @@ static int hex_value(char value)
 
 bool cuktech_ble_parse_mac(const char *text, uint8_t display_order[6])
 {
-    if (text == NULL || display_order == NULL) {
+    if (text == NULL || display_order == NULL || strlen(text) != 17U) {
         return false;
     }
     char separator = text[2];
@@ -37,7 +38,7 @@ bool cuktech_ble_parse_mac(const char *text, uint8_t display_order[6])
             return false;
         }
     }
-    return text[17] == '\0';
+    return true;
 }
 
 void cuktech_ble_mac_to_nimble(const uint8_t display_order[6],

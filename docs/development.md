@@ -95,3 +95,19 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - 协议启发式：移植当前 `state_protocol_v2.py` 规则，结果不宣称绝对准确
 - 上游 pytest：本机 Python 环境未安装 pytest，因此未执行；已直接审阅固定提交源码和测试文件
 - 真机密码学认证与 Notify 解析：待 BLE 链路和硬件阶段验证
+
+## 阶段 06 验证
+
+- `idf.py build`：通过，ESP-IDF 5.5.2，目标 `esp32c3`
+- 主机测试：4/4 通过，新增 MAC 解析、NimBLE 地址布局和有界指数退避测试
+- BLE 角色：Central / Observer / GATT Client；未启用 Peripheral 或 GATT Server
+- 连接：5 秒扫描匹配 MAC，未广播时有限次 public/random 直连，每次 10 秒超时
+- GATT：交换 MTU，按 UUID 发现 FE95 服务、六个特征和四个 CCCD，不使用固定 Handle
+- 并发：GAP/GATT 回调只复制入队，BLE 应用 task 串行拥有 GATT 顺序
+- Notify：12 项固定队列，单项最大 244 字节，溢出只计数不打印负载
+- 重连：普通错误指数退避 1 秒到 300 秒
+- 固件容量：`0xec780`，默认 1 MiB app 分区剩余 `0x13880`（约 8%）
+- 分区表：未修改；通过关闭未使用的 NimBLE 功能和 `-Os` 解决容量溢出
+- 真机扫描、地址类型、MTU、UUID/CCCD 和 Notify：待串口设备可见后烧录验证
+
+详细设计和证据等级见 [BLE GATT 链路](ble-gatt-link.md)。
