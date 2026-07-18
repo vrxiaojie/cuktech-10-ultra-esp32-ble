@@ -78,3 +78,20 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - SoftAP 限制：管理配置 GET/POST 只在 `sta_connected` 状态开放
 - 固件镜像：约 869 KiB，默认 1 MiB 应用分区剩余约 15%
 - 真机 HTTP 页面、NVS 保存后重启和局域网访问：待烧录验证
+
+## 阶段 05 验证
+
+- 上游基线：`kairui1108/cuktech-ble-ha@89e5f78387812323528f5967421f65a689e803ef`
+- `idf.py build`：通过，固件侧使用 ESP-IDF mbedTLS
+- 主机测试：3/3 通过，协议测试侧使用系统 OpenSSL 作为独立密码学后端
+- ASan/UBSan：3/3 通过
+- HKDF-SHA256：完整 64 字节黄金向量通过
+- HMAC-SHA256：设备方向与应用方向黄金向量通过
+- AES-CCM：Tag=4，TX/RX 计数器 0 黄金向量通过，篡改 Tag 拒绝
+- 计数器：`send_counter >= 0xffff` 返回重建会话要求
+- MiOT TLV：SET PIID5、GET PIID5、SET PIID21 三组向量通过
+- PIID 范围：与上游 `state.py` 当前可写范围一致
+- 端口解析：20.1 V、2.5 A、50.2 W、active、PD 样例通过
+- 协议启发式：移植当前 `state_protocol_v2.py` 规则，结果不宣称绝对准确
+- 上游 pytest：本机 Python 环境未安装 pytest，因此未执行；已直接审阅固定提交源码和测试文件
+- 真机密码学认证与 Notify 解析：待 BLE 链路和硬件阶段验证

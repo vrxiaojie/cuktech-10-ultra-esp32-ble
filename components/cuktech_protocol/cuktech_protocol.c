@@ -73,6 +73,8 @@ cuktech_protocol_status_t cuktech_session_derive(
     cuktech_crypto_zeroize(salt_inverse, sizeof(salt_inverse));
     cuktech_crypto_zeroize(derived, sizeof(derived));
     if (result != 0) {
+        cuktech_crypto_zeroize(expected_dev_hmac, CUKTECH_HMAC_SIZE);
+        cuktech_crypto_zeroize(app_hmac, CUKTECH_HMAC_SIZE);
         cuktech_session_clear(session);
         return CUKTECH_PROTOCOL_CRYPTO_ERROR;
     }
@@ -135,6 +137,7 @@ cuktech_protocol_status_t cuktech_encrypt_packet(cuktech_session_t *session,
     cuktech_crypto_zeroize(nonce, sizeof(nonce));
     cuktech_crypto_zeroize(counter, sizeof(counter));
     if (result != 0) {
+        cuktech_crypto_zeroize(packet, required);
         return CUKTECH_PROTOCOL_CRYPTO_ERROR;
     }
     ++session->send_counter;
@@ -169,7 +172,7 @@ cuktech_protocol_status_t cuktech_decrypt_packet(const cuktech_session_t *sessio
         packet + 2U + ciphertext_len, plaintext);
     cuktech_crypto_zeroize(nonce, sizeof(nonce));
     if (result != 0) {
-        cuktech_crypto_zeroize(plaintext, plaintext_capacity);
+        cuktech_crypto_zeroize(plaintext, ciphertext_len);
         return CUKTECH_PROTOCOL_AUTH_FAILED;
     }
     *plaintext_len = ciphertext_len;
