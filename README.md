@@ -6,7 +6,9 @@ ESP32 在 BLE 链路上是 Central / GATT Client，充电器是 Peripheral / GAT
 
 ## 当前状态
 
-项目正在按照 `AGENTS.md` 的阶段计划开发。当前工程可以为 `esp32c3` 构建，已实现版本化配置、Wi-Fi 配网与回退、STA 管理 API、通过黄金向量验证的 MiOT 协议组件、NimBLE Central GATT 链路、MiOT 登录状态机、设置与端口遥测、兼容 Home Assistant 的 MQTT retained 状态发布和断线遗嘱、MQTT/HTTP 控制命令队列，以及认证锁定后的 Web 手动恢复。BLE、MQTT、遥测与控制运行路径目前仅完成编译和主机测试，尚未真机验收。
+第一阶段软件功能已经按 `AGENTS.md` 的 12 个阶段实现：版本化配置、Wi-Fi 配网与回退、STA 管理 API、MiOT 密码学与认证、NimBLE Central GATT 链路、设置与端口遥测、MQTT retained 状态/LWT、Home Assistant 控制以及认证锁定恢复。当前环境已完成 ESP-IDF 构建、主机测试和消毒器测试；未发现可用串口，因此 BLE、MQTT、遥测与控制仍待真机烧录验收。
+
+协议结论和验证等级见 [协议说明](docs/protocol-notes.md) 与 [真机验收记录](docs/hardware-validation.md)。
 
 ## 构建
 
@@ -39,6 +41,8 @@ idf.py -p "$PORT" monitor
 
 不要把串口名硬编码进源码或脚本。烧录会写入目标设备 Flash；引入自定义分区表前必须单独评估并说明影响。
 
+WSL USB 转发、完整部署顺序和发布检查见 [部署与烧录](docs/deployment.md)。烧录完成后必须单独运行 `idf.py -p "$PORT" monitor`，不能仅凭 flash 成功声称运行通过。
+
 ## 首次配网
 
 没有有效 Wi-Fi 配置时，设备建立 `CUKTECH-BLE-<MAC后四位>` SoftAP，默认密码为 `cuktech10`，页面地址为 `http://192.168.4.1/`。默认密码可在 `idf.py menuconfig` 的 `CUKTECH BLE gateway` 菜单修改。
@@ -48,3 +52,14 @@ idf.py -p "$PORT" monitor
 ## 安全边界
 
 后续管理页面默认只适用于可信局域网。第一阶段不提供 HTTPS、MQTT TLS、OTA、云端账号登录或多充电器支持。Token、BLE Key、Wi-Fi 密码和 MQTT 密码不得写入日志、HTTP 响应或 MQTT 消息。
+
+## 文档导航
+
+- [部署与烧录](docs/deployment.md)
+- [Home Assistant 接入](docs/home-assistant.md)
+- [HTTP API](docs/http-api.md)
+- [MQTT 契约](docs/mqtt-bridge.md)
+- [故障排查](docs/troubleshooting.md)
+- [真机验收记录](docs/hardware-validation.md)
+- [开发与自动测试记录](docs/development.md)
+- [许可证与上游归属](NOTICE.md)
