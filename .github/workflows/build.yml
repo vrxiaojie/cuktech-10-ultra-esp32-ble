@@ -14,6 +14,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Run host unit tests
+        run: |
+          cmake -S tests/host -B /tmp/cuktech-host-tests -DCMAKE_BUILD_TYPE=Debug
+          cmake --build /tmp/cuktech-host-tests
+          ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
+
       - name: Build ESP32-C3 firmware
         uses: espressif/esp-idf-ci-action@v1
         with:

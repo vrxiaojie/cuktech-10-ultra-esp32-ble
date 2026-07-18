@@ -6,7 +6,7 @@ ESP32 在 BLE 链路上是 Central / GATT Client，充电器是 Peripheral / GAT
 
 ## 当前状态
 
-项目正在按照 `AGENTS.md` 的阶段计划开发。当前工程骨架可以为 `esp32c3` 构建，已启用 NimBLE Central、mbedTLS、ESP-MQTT、HTTP Server、NVS 和 Wi-Fi 依赖。配置存储、配网、Web、MiOT 认证、遥测和 MQTT 功能将在后续功能分支实现。
+项目正在按照 `AGENTS.md` 的阶段计划开发。当前工程可以为 `esp32c3` 构建，已启用 NimBLE Central、mbedTLS、ESP-MQTT、HTTP Server、NVS 和 Wi-Fi 依赖，并已实现版本化配置 Blob、输入校验、Secret 脱敏和 v0→v1 迁移。配网、Web、MiOT 认证、遥测和 MQTT 功能将在后续功能分支实现。
 
 ## 构建
 
@@ -16,6 +16,14 @@ idf.py --version
 idf.py set-target esp32c3
 idf.py reconfigure
 idf.py build
+```
+
+无需硬件的配置测试：
+
+```bash
+cmake -S tests/host -B /tmp/cuktech-host-tests -DCMAKE_BUILD_TYPE=Debug
+cmake --build /tmp/cuktech-host-tests
+ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 ```
 
 ESP-IDF 版本必须为 5.5.2 或更高版本。生成的 `sdkconfig` 仅属于本机环境，跨环境默认配置以版本控制中的 `sdkconfig.defaults` 为准。
