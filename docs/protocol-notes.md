@@ -16,6 +16,9 @@
 - 发送包前缀只携带 `send_it` 的低 16 位，因此固件在计数器达到 `0xffff` 前要求重建会话。
 - 充电器→ESP32使用 `dev_key`，Nonce 为 `dev_iv || 00000000 || it_le16 || 0000`。
 - MiOT TLV 的总长度包含 2 字节 frame header；UINT8 的 `type_id=1`，UINT32 的 `type_id=5`。
+- 认证后的命令发送使用单帧 header、RCV_RDY、`01 00 || encrypted_packet`、RCV_OK 串行握手。
+- GET result opcode 为 `0x03`；当前上游解析的值起点为 `pt[13]`，长度字段位于 `pt[11]`。
+- PIID 17/18 的 32 位值分别描述 C1/C2 与 C3/A 两组 PDO；PIID 21 是四端口协议开关位图。
 
 BLE Key、反序 MAC 辅助值和 `PRODUCT_ID=0x660e` 均未进入当前上游认证调用链。本项目不会把这些值混入 HKDF、HMAC 或 AES。
 
@@ -32,6 +35,8 @@ BLE Key、反序 MAC 辅助值和 `PRODUCT_ID=0x660e` 均未进入当前上游�
 - SET/GET TLV 字节序和长度
 - C1 端口 20.1 V、2.5 A、50.2 W、PD 样例
 - 完整认证写入/通知顺序、短初始化恢复、inline/multiframe 和 HMAC 拒绝
+- 命令通道 inline/multiframe ACK、重组解密、UINT8/UINT32 GET result 和计数器耗尽拒绝
+- PIID 17/18 PDO 拆分与 PIID 21 协议开关派生
 
 主机测试链接 OpenSSL，仅作为独立、无需 ESP32 的算法验证后端；固件编译使用 ESP-IDF 自带 mbedTLS。两者共享相同的会话、Nonce、计数器、TLV 和解析代码。
 
@@ -44,3 +49,9 @@ BLE Key、反序 MAC 辅助值和 `PRODUCT_ID=0x660e` 均未进入当前上游�
 ## 与上游的安全差异
 
 上游当前源码包含会话 Key/IV 的 debug 日志。ESP32 实现不输出 Token、随机数、派生材料、HMAC、IV、完整认证明文或加密包；临时派生缓冲、失败输出和会话清理使用显式清零。
+
+## 待真机复核的传输差异
+
+上游 `ble_manager.py` 的实时 multiframe 路径会消费各帧并尝试把单帧当作 inline 数据处理，而认证响应路径会按帧号去掉两字节头后拼接。依据本项目 `AGENTS.md` 的明确传输约束，ESP32 的认证后命令通道采用后一种重组方式：验证从 1 开始的连续帧号、拼接 encrypted payload、发送 RCV_OK 后再做一次 AES-CCM 解密。
+
+这是“源码结构对比后选择的实现”，不是“真机确认”。若真实设备的实时 multiframe 帧本身是完整 inline 包而非加密包分片，应以抓包和串口日志为准修订，并在本节记录测试固件、设备版本和可复现帧结构。

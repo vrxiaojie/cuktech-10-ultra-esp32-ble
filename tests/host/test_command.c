@@ -126,6 +126,16 @@ static void test_send(void)
     CHECK(mock.writes[1].data[0] == 1U && mock.writes[1].data[1] == 0U);
     CHECK(memcmp(mock.writes[1].data + 2U, TX_PACKET,
                  sizeof(TX_PACKET)) == 0);
+
+    mock_transport_t exhausted_mock = {0};
+    cuktech_command_transport_t exhausted_transport =
+        transport_for(&exhausted_mock);
+    session = golden_session();
+    session.send_counter = CUKTECH_SEND_COUNTER_REKEY;
+    CHECK(cuktech_command_send(&session, &exhausted_transport, PLAINTEXT,
+                               sizeof(PLAINTEXT)) ==
+          CUKTECH_COMMAND_COUNTER_EXHAUSTED);
+    CHECK(exhausted_mock.write_count == 0U);
 }
 
 static void test_inline_receive(void)
@@ -187,6 +197,14 @@ static void test_get_result_parser(void)
     CHECK(value == 0x03030f0fU);
     CHECK(!cuktech_command_parse_get_result(response, sizeof(response), 2U,
                                              20U, &value));
+
+    const uint8_t u8_response[] = {
+        0x0e, 0x20, 0x02, 0x00, 0x03, 0x01, 0x02,
+        0x05, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03,
+    };
+    CHECK(cuktech_command_parse_get_result(
+        u8_response, sizeof(u8_response), 2U, 5U, &value));
+    CHECK(value == 3U);
 }
 
 int main(void)
