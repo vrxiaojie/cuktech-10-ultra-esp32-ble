@@ -1,2 +1,16 @@
-idf_component_register(SRCS "main.c"
-                    INCLUDE_DIRS ".")
+idf_component_register(
+    SRCS
+        "main.c"
+        "app_orchestrator.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        bt
+        esp_app_format
+        esp_http_server
+        esp_wifi
+        json
+        mbedtls
+        mqtt
+        nvs_flash
+)
