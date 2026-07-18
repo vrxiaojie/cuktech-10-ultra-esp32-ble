@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "charger_state.h"
 #include "cuktech_ble_core.h"
+#include "cuktech_command.h"
 #include "cuktech_miot_auth.h"
 #include "cuktech_protocol.h"
 #include "esp_log.h"
@@ -38,6 +40,13 @@
 #define BLE_PENDING_NOTIFY_DEPTH 8U
 #define BLE_AUTH_FAILURE_LOCK_COUNT 5U
 #define BLE_AUTH_MIN_RETRY_SECONDS 3U
+#define BLE_READ_MAX_PAYLOAD 64U
+#define BLE_COMMAND_TIMEOUT_MS 3000U
+#define BLE_COMMAND_RESPONSE_TIMEOUT_MS 8000U
+#define BLE_SETTINGS_REFRESH_MS 60000U
+#define BLE_INIT_PUSH_MAX_COUNT 60U
+#define BLE_INIT_PUSH_MAX_MS 6000U
+#define BLE_DECRYPT_FAILURE_LIMIT 10U
 
 typedef enum {
     CONTROL_EVENT_HOST_SYNC = 0,
@@ -54,6 +63,7 @@ typedef enum {
     CONTROL_EVENT_DESCRIPTOR_ITEM,
     CONTROL_EVENT_DESCRIPTOR_DONE,
     CONTROL_EVENT_WRITE_DONE,
+    CONTROL_EVENT_READ_DONE,
 } control_event_type_t;
 
 typedef struct {
@@ -83,6 +93,11 @@ typedef struct {
         struct {
             uint16_t attr_handle;
         } write;
+        struct {
+            uint16_t attr_handle;
+            uint16_t length;
+            uint8_t bytes[BLE_READ_MAX_PAYLOAD];
+        } read;
     } data;
 } control_event_t;
 
@@ -131,10 +146,15 @@ static const miot_characteristic_id_t SUBSCRIBE_TARGETS[] = {
     MIOT_CHAR_AUTH_DATA,
     MIOT_CHAR_COMMAND_SEND,
     MIOT_CHAR_COMMAND_RECEIVE,
+    MIOT_CHAR_DEVICE_INFO,
 };
 static const uint8_t BLUETOOTH_UUID_BASE_LE[12] = {
     0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00,
     0x00, 0x80, 0x00, 0x10, 0x00, 0x00,
+};
+static const uint16_t READABLE_SETTINGS_PIIDS[] = {
+    5U, 6U, 8U, 9U, 10U, 11U, 12U, 13U,
+    15U, 16U, 17U, 18U, 19U, 20U, 21U,
 };
 
 static QueueHandle_t s_control_queue;
@@ -489,6 +509,31 @@ static int write_callback(uint16_t conn_handle,
     return 0;
 }
 
+static int read_callback(uint16_t conn_handle,
+                         const struct ble_gatt_error *error,
+                         struct ble_gatt_attr *attribute, void *argument)
+{
+    control_event_t event = {
+        .type = CONTROL_EVENT_READ_DONE,
+        .status = error->status,
+        .conn_handle = conn_handle,
+    };
+    event.data.read.attr_handle =
+        attribute != NULL ? attribute->handle : (uint16_t)(uintptr_t)argument;
+    if (error->status == 0 && attribute != NULL && attribute->om != NULL) {
+        uint16_t length = OS_MBUF_PKTLEN(attribute->om);
+        if (length > sizeof(event.data.read.bytes) ||
+            os_mbuf_copydata(attribute->om, 0, length,
+                             event.data.read.bytes) != 0) {
+            event.status = BLE_HS_EMSGSIZE;
+        } else {
+            event.data.read.length = length;
+        }
+    }
+    enqueue_control(&event);
+    return 0;
+}
+
 static void drain_notifications(void)
 {
     notify_event_t event;
@@ -537,6 +582,87 @@ static void pending_notification_store(const notify_event_t *notification)
         s_pending_notifications[s_pending_notification_count++] = *notification;
     } else {
         record_notification_drop();
+    }
+}
+
+static void discard_notifications_for_handle(uint16_t attr_handle)
+{
+    for (size_t index = 0U; index < s_pending_notification_count;) {
+        if (s_pending_notifications[index].attr_handle == attr_handle) {
+            if (index + 1U < s_pending_notification_count) {
+                memmove(&s_pending_notifications[index],
+                        &s_pending_notifications[index + 1U],
+                        (s_pending_notification_count - index - 1U) *
+                            sizeof(s_pending_notifications[0]));
+            }
+            --s_pending_notification_count;
+        } else {
+            ++index;
+        }
+    }
+}
+
+static cuktech_command_io_status_t receive_notification_for_handle(
+    uint16_t expected_handle, uint8_t *data, size_t data_capacity,
+    size_t *data_len, uint32_t timeout_ms)
+{
+    if (expected_handle == 0U || data == NULL || data_len == NULL) {
+        return CUKTECH_COMMAND_IO_ERROR;
+    }
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+    for (;;) {
+        notify_event_t notification;
+        if (pending_notification_take(expected_handle, &notification)) {
+            if (notification.length > data_capacity) {
+                return CUKTECH_COMMAND_IO_ERROR;
+            }
+            memcpy(data, notification.data, notification.length);
+            *data_len = notification.length;
+            return CUKTECH_COMMAND_IO_OK;
+        }
+        while (xQueueReceive(s_notify_queue, &notification, 0) == pdTRUE) {
+            record_notification_received();
+            if (notification.conn_handle != s_conn_handle) {
+                continue;
+            }
+            if (notification.attr_handle == expected_handle) {
+                if (notification.length > data_capacity) {
+                    return CUKTECH_COMMAND_IO_ERROR;
+                }
+                memcpy(data, notification.data, notification.length);
+                *data_len = notification.length;
+                return CUKTECH_COMMAND_IO_OK;
+            }
+            pending_notification_store(&notification);
+        }
+        control_event_t control;
+        while (xQueueReceive(s_control_queue, &control, 0) == pdTRUE) {
+            if (control.type == CONTROL_EVENT_DISCONNECTED) {
+                s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                charger_state_set_connection(false, false);
+                update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
+                              "peer_disconnected");
+                return CUKTECH_COMMAND_IO_DISCONNECTED;
+            }
+            if (control.type == CONTROL_EVENT_HOST_RESET) {
+                s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                charger_state_set_connection(false, false);
+                set_last_error_code("host_reset", control.status);
+                update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
+                              NULL);
+                return CUKTECH_COMMAND_IO_DISCONNECTED;
+            }
+        }
+        if (s_control_overflow) {
+            s_control_overflow = false;
+            return CUKTECH_COMMAND_IO_ERROR;
+        }
+        TickType_t elapsed = xTaskGetTickCount() - started;
+        if (elapsed >= timeout) {
+            return CUKTECH_COMMAND_IO_TIMEOUT;
+        }
+        ulTaskNotifyTake(pdTRUE, timeout - elapsed);
     }
 }
 
@@ -645,12 +771,14 @@ static cuktech_miot_auth_io_status_t auth_transport_receive(
         while (xQueueReceive(s_control_queue, &control, 0) == pdTRUE) {
             if (control.type == CONTROL_EVENT_DISCONNECTED) {
                 s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                charger_state_set_connection(false, false);
                 update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
                               "peer_disconnected");
                 return CUKTECH_MIOT_AUTH_IO_DISCONNECTED;
             }
             if (control.type == CONTROL_EVENT_HOST_RESET) {
                 s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+                charger_state_set_connection(false, false);
                 set_last_error_code("host_reset", control.status);
                 update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
                               NULL);
@@ -737,6 +865,7 @@ static cuktech_miot_auth_status_t authenticate_link(uint32_t failure_count)
     if (status == CUKTECH_MIOT_AUTH_OK) {
         update_status(CUKTECH_BLE_STATE_AUTHENTICATED, true, true, 0U, 0U, "");
         update_authentication_status(true, 0U, "");
+        charger_state_set_connection(true, true);
         ESP_LOGI(TAG, "MiOT login authentication succeeded");
     } else {
         char error[CUKTECH_BLE_LAST_ERROR_MAX_LEN + 1U];
@@ -752,11 +881,276 @@ static cuktech_miot_auth_status_t authenticate_link(uint32_t failure_count)
     return status;
 }
 
+static uint16_t command_channel_handle(cuktech_command_channel_t channel)
+{
+    return channel == CUKTECH_COMMAND_CHANNEL_SEND
+               ? s_miot_characteristics[MIOT_CHAR_COMMAND_SEND].value_handle
+               : s_miot_characteristics[MIOT_CHAR_COMMAND_RECEIVE].value_handle;
+}
+
+static cuktech_command_io_status_t command_transport_write(
+    void *context, cuktech_command_channel_t channel, const uint8_t *data,
+    size_t data_len)
+{
+    (void)context;
+    uint16_t handle = command_channel_handle(channel);
+    if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        return CUKTECH_COMMAND_IO_DISCONNECTED;
+    }
+    if (handle == 0U || data == NULL || data_len == 0U ||
+        data_len > UINT16_MAX) {
+        return CUKTECH_COMMAND_IO_ERROR;
+    }
+    int rc = ble_gattc_write_no_rsp_flat(s_conn_handle, handle, data,
+                                         (uint16_t)data_len);
+    if (rc == BLE_HS_ENOTCONN) {
+        return CUKTECH_COMMAND_IO_DISCONNECTED;
+    }
+    return rc == 0 ? CUKTECH_COMMAND_IO_OK : CUKTECH_COMMAND_IO_ERROR;
+}
+
+static cuktech_command_io_status_t command_transport_receive(
+    void *context, cuktech_command_channel_t channel, uint8_t *data,
+    size_t data_capacity, size_t *data_len, uint32_t timeout_ms)
+{
+    (void)context;
+    return receive_notification_for_handle(command_channel_handle(channel),
+                                           data, data_capacity, data_len,
+                                           timeout_ms);
+}
+
+static const cuktech_command_transport_t COMMAND_TRANSPORT = {
+    .context = NULL,
+    .write = command_transport_write,
+    .receive = command_transport_receive,
+};
+
+static bool process_miot_plaintext(const uint8_t *plaintext,
+                                   size_t plaintext_len)
+{
+    if (plaintext == NULL || plaintext_len < 9U || plaintext[1] != 0x20U ||
+        plaintext[4] != 0x04U || plaintext[6] != 2U ||
+        plaintext[8] != 0U) {
+        return false;
+    }
+    uint8_t piid = plaintext[7];
+    if (piid < 1U || piid > 4U) {
+        return false;
+    }
+    charger_state_snapshot_t snapshot;
+    charger_state_get_snapshot(&snapshot);
+    cuktech_pdo_kind_t pdo_kind;
+    cuktech_type_c_switches_t switches;
+    charger_state_core_protocol_inputs(&snapshot, piid, &pdo_kind, &switches);
+    cuktech_port_state_t port;
+    if (cuktech_decode_port(piid, plaintext, plaintext_len, pdo_kind,
+                            piid <= 2U ? &switches : NULL,
+                            &port) != CUKTECH_PROTOCOL_OK) {
+        return false;
+    }
+    charger_state_update_port(piid, &port);
+    ESP_LOGD(TAG,
+             "port piid=%u voltage=%.1f current=%.1f power=%.1f active=%s protocol=%s",
+             piid, (double)port.voltage, (double)port.current,
+             (double)port.power, port.active ? "yes" : "no",
+             cuktech_charge_protocol_name(port.protocol));
+    return true;
+}
+
+static cuktech_command_status_t receive_and_process_plaintext(
+    uint8_t *plaintext, size_t plaintext_capacity, size_t *plaintext_len,
+    uint32_t timeout_ms, uint32_t *decrypt_failures)
+{
+    cuktech_command_status_t status = cuktech_command_receive(
+        &s_session, &COMMAND_TRANSPORT, plaintext, plaintext_capacity,
+        plaintext_len, timeout_ms);
+    if (status == CUKTECH_COMMAND_CRYPTO_ERROR) {
+        ++*decrypt_failures;
+        ESP_LOGW(TAG, "command decrypt failed consecutively=%" PRIu32,
+                 *decrypt_failures);
+    } else if (status == CUKTECH_COMMAND_OK) {
+        *decrypt_failures = 0U;
+    }
+    return status;
+}
+
+static bool send_get_setting(uint16_t piid, uint32_t *decrypt_failures,
+                             bool *session_stale)
+{
+    uint8_t plaintext[32];
+    size_t plaintext_len = 0U;
+    uint8_t sequence = s_session.miot_sequence++;
+    if (cuktech_miot_build_get(sequence, 2U, piid, plaintext,
+                               sizeof(plaintext), &plaintext_len) !=
+        CUKTECH_PROTOCOL_OK) {
+        return false;
+    }
+    cuktech_command_status_t status = cuktech_command_send(
+        &s_session, &COMMAND_TRANSPORT, plaintext, plaintext_len);
+    if (status == CUKTECH_COMMAND_COUNTER_EXHAUSTED ||
+        status == CUKTECH_COMMAND_DISCONNECTED) {
+        *session_stale = true;
+        return false;
+    }
+    if (status != CUKTECH_COMMAND_OK) {
+        ESP_LOGW(TAG, "GET PIID %u send failed stage=%s", piid,
+                 cuktech_command_status_name(status));
+        return false;
+    }
+
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout = pdMS_TO_TICKS(BLE_COMMAND_RESPONSE_TIMEOUT_MS);
+    while (xTaskGetTickCount() - started < timeout) {
+        uint32_t remaining =
+            (uint32_t)((timeout - (xTaskGetTickCount() - started)) *
+                       portTICK_PERIOD_MS);
+        if (remaining > BLE_COMMAND_TIMEOUT_MS) {
+            remaining = BLE_COMMAND_TIMEOUT_MS;
+        }
+        plaintext_len = 0U;
+        status = receive_and_process_plaintext(
+            plaintext, sizeof(plaintext), &plaintext_len, remaining,
+            decrypt_failures);
+        if (*decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT ||
+            status == CUKTECH_COMMAND_DISCONNECTED) {
+            *session_stale = true;
+            return false;
+        }
+        if (status == CUKTECH_COMMAND_TIMEOUT ||
+            status == CUKTECH_COMMAND_CRYPTO_ERROR ||
+            status == CUKTECH_COMMAND_PROTOCOL_ERROR) {
+            continue;
+        }
+        if (status != CUKTECH_COMMAND_OK) {
+            ESP_LOGW(TAG, "GET PIID %u receive failed stage=%s", piid,
+                     cuktech_command_status_name(status));
+            return false;
+        }
+        uint32_t value = 0U;
+        if (cuktech_command_parse_get_result(plaintext, plaintext_len, 2U,
+                                             piid, &value)) {
+            charger_state_update_setting(piid, value);
+            ESP_LOGD(TAG, "setting PIID %u updated", piid);
+            return true;
+        }
+        (void)process_miot_plaintext(plaintext, plaintext_len);
+    }
+    ESP_LOGW(TAG, "GET PIID %u response timed out", piid);
+    return false;
+}
+
+static bool refresh_settings(uint32_t *decrypt_failures)
+{
+    size_t failures = 0U;
+    bool session_stale = false;
+    for (size_t index = 0U;
+         index < sizeof(READABLE_SETTINGS_PIIDS) /
+                     sizeof(READABLE_SETTINGS_PIIDS[0]);
+         ++index) {
+        if (!send_get_setting(READABLE_SETTINGS_PIIDS[index],
+                              decrypt_failures, &session_stale)) {
+            ++failures;
+        }
+        if (session_stale) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100U));
+    }
+    ESP_LOGI(TAG, "settings refresh complete success=%u failed=%u",
+             (unsigned)(sizeof(READABLE_SETTINGS_PIIDS) /
+                            sizeof(READABLE_SETTINGS_PIIDS[0]) -
+                        failures),
+             (unsigned)failures);
+    return true;
+}
+
+static bool drain_initial_pushes(uint32_t *decrypt_failures)
+{
+    discard_notifications_for_handle(
+        s_miot_characteristics[MIOT_CHAR_COMMAND_SEND].value_handle);
+    vTaskDelay(pdMS_TO_TICKS(500U));
+    TickType_t started = xTaskGetTickCount();
+    size_t received = 0U;
+    while (received < BLE_INIT_PUSH_MAX_COUNT &&
+           (xTaskGetTickCount() - started) * portTICK_PERIOD_MS <
+               BLE_INIT_PUSH_MAX_MS) {
+        uint8_t plaintext[CUKTECH_COMMAND_PLAINTEXT_MAX];
+        size_t plaintext_len = 0U;
+        cuktech_command_status_t status = receive_and_process_plaintext(
+            plaintext, sizeof(plaintext), &plaintext_len, 800U,
+            decrypt_failures);
+        if (status == CUKTECH_COMMAND_TIMEOUT) {
+            break;
+        }
+        if (status == CUKTECH_COMMAND_DISCONNECTED ||
+            *decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT) {
+            return false;
+        }
+        if (status == CUKTECH_COMMAND_OK) {
+            ++received;
+            (void)process_miot_plaintext(plaintext, plaintext_len);
+        }
+    }
+    discard_notifications_for_handle(
+        s_miot_characteristics[MIOT_CHAR_COMMAND_SEND].value_handle);
+    ESP_LOGI(TAG, "processed %u authentication-time command pushes",
+             (unsigned)received);
+    return true;
+}
+
+static bool run_authenticated_session(void)
+{
+    uint32_t decrypt_failures = 0U;
+    if (!drain_initial_pushes(&decrypt_failures) ||
+        !refresh_settings(&decrypt_failures)) {
+        update_status(CUKTECH_BLE_STATE_ERROR,
+                      s_conn_handle != BLE_HS_CONN_HANDLE_NONE, true, 0U, 0U,
+                      decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT
+                          ? "session_stale_decrypt"
+                          : "command_channel_failed");
+        return false;
+    }
+
+    TickType_t last_refresh = xTaskGetTickCount();
+    while (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        uint8_t plaintext[CUKTECH_COMMAND_PLAINTEXT_MAX];
+        size_t plaintext_len = 0U;
+        cuktech_command_status_t status = receive_and_process_plaintext(
+            plaintext, sizeof(plaintext), &plaintext_len, 2000U,
+            &decrypt_failures);
+        if (status == CUKTECH_COMMAND_OK) {
+            (void)process_miot_plaintext(plaintext, plaintext_len);
+        } else if (status == CUKTECH_COMMAND_DISCONNECTED) {
+            return false;
+        } else if (decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT) {
+            update_status(CUKTECH_BLE_STATE_ERROR, true, true, 0U, 0U,
+                          "session_stale_decrypt");
+            return false;
+        } else if (status != CUKTECH_COMMAND_TIMEOUT &&
+                   status != CUKTECH_COMMAND_PROTOCOL_ERROR &&
+                   status != CUKTECH_COMMAND_CRYPTO_ERROR) {
+            ESP_LOGW(TAG, "command receive failed stage=%s",
+                     cuktech_command_status_name(status));
+        }
+        if ((xTaskGetTickCount() - last_refresh) * portTICK_PERIOD_MS >=
+            BLE_SETTINGS_REFRESH_MS) {
+            if (!refresh_settings(&decrypt_failures)) {
+                update_status(CUKTECH_BLE_STATE_ERROR, true, true, 0U, 0U,
+                              "settings_refresh_failed");
+                return false;
+            }
+            last_refresh = xTaskGetTickCount();
+        }
+    }
+    return false;
+}
+
 static bool handle_common_failure_event(const control_event_t *event,
                                         const char *stage)
 {
     if (event->type == CONTROL_EVENT_DISCONNECTED) {
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        charger_state_set_connection(false, false);
         update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
                       "peer_disconnected");
         ESP_LOGW(TAG, "%s interrupted by disconnect reason=%d", stage,
@@ -765,6 +1159,7 @@ static bool handle_common_failure_event(const control_event_t *event,
     }
     if (event->type == CONTROL_EVENT_HOST_RESET) {
         s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        charger_state_set_connection(false, false);
         set_last_error_code("host_reset", event->status);
         update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U, NULL);
         ESP_LOGE(TAG, "NimBLE host reset during %s reason=%d", stage,
@@ -835,6 +1230,7 @@ static bool connect_to_address(const ble_addr_t *address)
                 return false;
             }
             s_conn_handle = event.conn_handle;
+            charger_state_set_connection(true, false);
             update_status(CUKTECH_BLE_STATE_CONNECTING, true, false, 0U, 0U, "");
             ESP_LOGI(TAG, "BLE connection established handle=%u",
                      (unsigned)s_conn_handle);
@@ -1201,8 +1597,114 @@ static bool prepare_gatt_link(void)
         }
     }
     update_status(CUKTECH_BLE_STATE_READY, true, true, 0U, 0U, "");
-    ESP_LOGI(TAG, "GATT link ready; four MiOT notification channels enabled");
+    ESP_LOGI(TAG, "GATT link ready; five MiOT notification channels enabled");
     return true;
+}
+
+static void copy_ascii_field(char *output, size_t output_size,
+                             const uint8_t *input, size_t input_len)
+{
+    if (output == NULL || output_size == 0U) {
+        return;
+    }
+    size_t written = 0U;
+    while (written < input_len && written + 1U < output_size &&
+           input[written] != 0U) {
+        uint8_t byte = input[written];
+        output[written] = byte >= 0x20U && byte <= 0x7eU ? (char)byte : '?';
+        ++written;
+    }
+    output[written] = '\0';
+}
+
+static bool query_device_info(char *device_model, size_t device_model_size)
+{
+    uint16_t handle =
+        s_miot_characteristics[MIOT_CHAR_DEVICE_INFO].value_handle;
+    if (handle == 0U || device_model == NULL || device_model_size == 0U) {
+        return false;
+    }
+    const uint8_t chip_query = 0x03U;
+    int rc = ble_gattc_write_no_rsp_flat(s_conn_handle, handle, &chip_query,
+                                         sizeof(chip_query));
+    if (rc != 0) {
+        ESP_LOGW(TAG, "device info query failed rc=%d", rc);
+        return false;
+    }
+    uint8_t response[BLE_NOTIFY_MAX_PAYLOAD];
+    size_t response_len = 0U;
+    if (receive_notification_for_handle(handle, response, sizeof(response),
+                                        &response_len,
+                                        BLE_COMMAND_TIMEOUT_MS) !=
+            CUKTECH_COMMAND_IO_OK ||
+        response_len < 3U) {
+        ESP_LOGW(TAG, "device info response unavailable");
+        return false;
+    }
+    size_t chip_len = response[1];
+    if (chip_len > response_len - 2U) {
+        chip_len = response_len - 2U;
+    }
+    char chip[32];
+    copy_ascii_field(chip, sizeof(chip), response + 2U, chip_len);
+    if (chip[0] == '\0') {
+        return false;
+    }
+    snprintf(device_model, device_model_size, "njcuk.fitting.ad1204_%s", chip);
+    return true;
+}
+
+static bool read_firmware_version(char *firmware, size_t firmware_size)
+{
+    uint16_t handle = s_miot_characteristics[MIOT_CHAR_FIRMWARE].value_handle;
+    if (handle == 0U || firmware == NULL || firmware_size == 0U) {
+        return false;
+    }
+    int rc = ble_gattc_read(s_conn_handle, handle, read_callback,
+                            (void *)(uintptr_t)handle);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "firmware read start failed rc=%d", rc);
+        return false;
+    }
+    control_event_t event;
+    TickType_t started = xTaskGetTickCount();
+    TickType_t timeout = pdMS_TO_TICKS(BLE_COMMAND_TIMEOUT_MS);
+    while (xTaskGetTickCount() - started < timeout) {
+        uint32_t remaining =
+            (uint32_t)((timeout - (xTaskGetTickCount() - started)) *
+                       portTICK_PERIOD_MS);
+        if (!wait_control_event(&event, remaining)) {
+            break;
+        }
+        if (event.type == CONTROL_EVENT_READ_DONE &&
+            event.data.read.attr_handle == handle) {
+            if (event.status != 0) {
+                ESP_LOGW(TAG, "firmware read failed status=%d", event.status);
+                return false;
+            }
+            copy_ascii_field(firmware, firmware_size, event.data.read.bytes,
+                             event.data.read.length);
+            return firmware[0] != '\0';
+        }
+        if (handle_common_failure_event(&event, "firmware_read")) {
+            return false;
+        }
+    }
+    ESP_LOGW(TAG, "firmware read timed out");
+    return false;
+}
+
+static void read_and_store_device_info(void)
+{
+    char device_model[CHARGER_STATE_DEVICE_MODEL_MAX_LEN + 1U] = {0};
+    char firmware[CHARGER_STATE_FIRMWARE_MAX_LEN + 1U] = {0};
+    bool model_ok = query_device_info(device_model, sizeof(device_model));
+    bool firmware_ok = read_firmware_version(firmware, sizeof(firmware));
+    charger_state_set_device_info(model_ok ? device_model : "",
+                                  firmware_ok ? firmware : "");
+    ESP_LOGI(TAG, "charger info model=%s firmware=%s",
+             model_ok ? device_model : "unknown",
+             firmware_ok ? firmware : "unknown");
 }
 
 static void disable_notifications_best_effort(void)
@@ -1253,6 +1755,7 @@ static void disable_notifications_best_effort(void)
 static void disconnect_cleanly(void)
 {
     if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        charger_state_set_connection(false, false);
         cuktech_session_clear(&s_session);
         memset(s_miot_characteristics, 0, sizeof(s_miot_characteristics));
         update_status(CUKTECH_BLE_STATE_DISCONNECTING, false, false, 0U, 0U,
@@ -1263,6 +1766,7 @@ static void disconnect_cleanly(void)
     update_status(CUKTECH_BLE_STATE_DISCONNECTING, true, false, 0U, 0U, NULL);
     disable_notifications_best_effort();
     if (s_conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        charger_state_set_connection(false, false);
         cuktech_session_clear(&s_session);
         memset(s_miot_characteristics, 0, sizeof(s_miot_characteristics));
         update_status(CUKTECH_BLE_STATE_DISCONNECTING, false, false, 0U, 0U,
@@ -1292,35 +1796,11 @@ static void disconnect_cleanly(void)
         }
     }
     s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    charger_state_set_connection(false, false);
     cuktech_session_clear(&s_session);
     memset(s_miot_characteristics, 0, sizeof(s_miot_characteristics));
     update_status(CUKTECH_BLE_STATE_DISCONNECTING, false, false, 0U, 0U, NULL);
     discard_queued_events();
-}
-
-static void wait_until_disconnected(void)
-{
-    control_event_t event;
-    while (s_conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        drain_notifications();
-        if (!wait_control_event(&event, 100U)) {
-            continue;
-        }
-        if (event.type == CONTROL_EVENT_DISCONNECTED) {
-            ESP_LOGW(TAG, "BLE link disconnected reason=%d", event.status);
-            s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-            cuktech_session_clear(&s_session);
-            memset(s_miot_characteristics, 0,
-                   sizeof(s_miot_characteristics));
-            update_status(CUKTECH_BLE_STATE_ERROR, false, false, 0U, 0U,
-                          "peer_disconnected");
-            return;
-        }
-        if (event.type == CONTROL_EVENT_HOST_RESET) {
-            handle_common_failure_event(&event, "ready");
-            return;
-        }
-    }
 }
 
 static void retry_delay(uint32_t seconds)
@@ -1344,12 +1824,14 @@ static void ble_application_task(void *argument)
         bool authentication_failed = false;
         discard_queued_events();
         if (scan_then_connect() && prepare_gatt_link()) {
+            read_and_store_device_info();
             cuktech_miot_auth_status_t auth_status =
                 authenticate_link(authentication_failures);
             if (auth_status == CUKTECH_MIOT_AUTH_OK) {
                 authentication_failures = 0U;
                 backoff = 0U;
-                wait_until_disconnected();
+                (void)run_authenticated_session();
+                disconnect_cleanly();
             } else {
                 authentication_failed = true;
                 if (authentication_status_counts_failure(auth_status)) {

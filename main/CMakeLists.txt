@@ -7,6 +7,7 @@ idf_component_register(
     REQUIRES
         app_config
         bt
+        charger_state
         cuktech_ble
         cuktech_protocol
         esp_app_format

@@ -1,6 +1,7 @@
 #include "app_orchestrator.h"
 
 #include "app_config.h"
+#include "charger_state.h"
 #include "cuktech_ble.h"
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -30,6 +31,12 @@ void app_orchestrator_start(void)
     esp_err_t error = app_config_store_init();
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "NVS initialization failed: %s", esp_err_to_name(error));
+        return;
+    }
+    error = charger_state_init();
+    if (error != ESP_OK) {
+        ESP_LOGE(TAG, "charger state initialization failed: %s",
+                 esp_err_to_name(error));
         return;
     }
     error = app_config_load(&config, &config_found);
