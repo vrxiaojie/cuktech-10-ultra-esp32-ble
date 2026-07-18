@@ -40,6 +40,22 @@ target_compile_options(charger_state_tests PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(charger_state_tests PRIVATE m)
 add_test(NAME charger_state_tests COMMAND charger_state_tests)
 
+add_executable(mqtt_bridge_tests
+    test_mqtt_bridge.c
+    ../../components/mqtt_bridge/mqtt_bridge_model.c
+    ../../components/charger_state/charger_state_core.c
+    ../../components/cuktech_protocol/port_decode.c
+)
+target_include_directories(mqtt_bridge_tests PRIVATE
+    ../../components/mqtt_bridge/include
+    ../../components/charger_state/include
+    ../../components/cuktech_protocol/include
+)
+target_compile_features(mqtt_bridge_tests PRIVATE c_std_17)
+target_compile_options(mqtt_bridge_tests PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(mqtt_bridge_tests PRIVATE m)
+add_test(NAME mqtt_bridge_tests COMMAND mqtt_bridge_tests)
+
 if(NOT IDF_PATH AND DEFINED ENV{IDF_PATH})
     set(IDF_PATH "$ENV{IDF_PATH}")
 endif()

@@ -143,3 +143,19 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - 真机命令握手、设备信息、设置读取、端口 Notify 和长期刷新：当前未发现串口，尚未完成
 
 详细设计和证据等级见 [充电器设置与端口遥测](charger-telemetry.md)。
+
+## 阶段 09 验证
+
+- `idf.py build`：通过，ESP-IDF 5.5.2，目标 `esp32c3`
+- 固件镜像：`0xf8840`，默认 1 MiB app 分区剩余 `0x77c0`（约 3%），未修改分区表
+- 主机测试：8/8 通过；ASan/UBSan 8/8 通过
+- MQTT：固定使用 3.1.1 与明文 TCP；TLS、WebSocket 和 MQTT 5 为第一阶段非目标
+- LWT：`<prefix>/status`、QoS 1、retain，负载 `{"connected":false}`
+- retained 快照：四端口 QoS 0，settings/status QoS 1；首次连接和每次重连后全量重发
+- 增量发布：状态 revision 变化后只发布实际变化的端口、settings 或 status
+- `/api/status`：接入实际 `mqtt_connected`、`mqtt_state`、重连次数和发布失败次数
+- 容量：关闭第一阶段不使用的 WPA3/SAE/OWE、GMAC、IPv6 和通用 WebSocket transport；保留 WPA2-Personal、IPv4、SoftAP、HTTP 和 MiOT 密码学
+- Secret：MQTT password 只在静态运行配置和 ESP-MQTT 配置中使用，不进入日志、HTTP 响应或 MQTT 负载
+- 真机 Broker 连接、LWT、retain、断线重连和完整快照：当前未发现串口，尚未完成
+
+详细契约和证据等级见 [MQTT 状态桥接](mqtt-bridge.md)。

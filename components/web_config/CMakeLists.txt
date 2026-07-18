@@ -10,5 +10,6 @@ idf_component_register(
         esp_system
         esp_app_format
         json
+        mqtt_bridge
         wifi_manager
 )

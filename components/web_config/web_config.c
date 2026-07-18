@@ -14,6 +14,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mqtt_bridge.h"
 #include "web_config_model.h"
 #include "wifi_manager.h"
 
@@ -226,6 +227,8 @@ static esp_err_t status_handler(httpd_req_t *request)
     const esp_app_desc_t *app = esp_app_get_description();
     cuktech_ble_status_t ble_status;
     cuktech_ble_get_status(&ble_status);
+    mqtt_bridge_status_t mqtt_status;
+    mqtt_bridge_get_status(&mqtt_status);
     charger_state_snapshot_t state;
     charger_state_get_snapshot(&state);
 
@@ -244,7 +247,7 @@ static esp_err_t status_handler(httpd_req_t *request)
     }
     cJSON_AddBoolToObject(root, "connected", state.connected);
     cJSON_AddBoolToObject(root, "authenticated", state.authenticated);
-    cJSON_AddBoolToObject(root, "mqtt_connected", false);
+    cJSON_AddBoolToObject(root, "mqtt_connected", mqtt_status.connected);
     cJSON_AddStringToObject(root, "device_model", state.device_model);
     cJSON_AddStringToObject(root, "firmware_version",
                            state.firmware_version);
@@ -314,10 +317,16 @@ static esp_err_t status_handler(httpd_req_t *request)
                            wifi_manager_state_name(wifi_manager_get_state()));
     cJSON_AddStringToObject(root, "ble_state",
                            cuktech_ble_state_name(ble_status.state));
+    cJSON_AddStringToObject(root, "mqtt_state",
+                           mqtt_bridge_state_name(mqtt_status.state));
     cJSON_AddBoolToObject(root, "ble_gatt_ready", ble_status.gatt_ready);
     cJSON_AddNumberToObject(root, "ble_mtu", ble_status.mtu);
     cJSON_AddNumberToObject(root, "ble_notify_dropped",
                            ble_status.notifications_dropped);
+    cJSON_AddNumberToObject(root, "mqtt_reconnects",
+                           mqtt_status.reconnects);
+    cJSON_AddNumberToObject(root, "mqtt_publish_failures",
+                           mqtt_status.publish_failures);
     cJSON_AddStringToObject(root, "last_error", ble_status.last_error);
     cJSON_AddNumberToObject(root, "free_heap", esp_get_free_heap_size());
     cJSON_AddNumberToObject(root, "state_revision", state.revision);

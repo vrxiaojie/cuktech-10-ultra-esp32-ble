@@ -16,6 +16,7 @@ idf_component_register(
         json
         mbedtls
         mqtt
+        mqtt_bridge
         nvs_flash
         web_config
         wifi_manager
