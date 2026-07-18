@@ -21,6 +21,9 @@ typedef enum {
     CUKTECH_BLE_STATE_DISCOVERING_DESCRIPTORS,
     CUKTECH_BLE_STATE_SUBSCRIBING,
     CUKTECH_BLE_STATE_READY,
+    CUKTECH_BLE_STATE_AUTHENTICATING,
+    CUKTECH_BLE_STATE_AUTHENTICATED,
+    CUKTECH_BLE_STATE_AUTH_FAILED_LOCKED,
     CUKTECH_BLE_STATE_DISCONNECTING,
     CUKTECH_BLE_STATE_BACKOFF,
     CUKTECH_BLE_STATE_ERROR,
@@ -31,10 +34,12 @@ typedef struct {
     bool enabled;
     bool connected;
     bool gatt_ready;
+    bool authenticated;
     uint16_t mtu;
     uint32_t notifications_received;
     uint32_t notifications_dropped;
     uint32_t retry_delay_seconds;
+    uint32_t authentication_failures;
     char last_error[CUKTECH_BLE_LAST_ERROR_MAX_LEN + 1U];
 } cuktech_ble_status_t;
 

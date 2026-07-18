@@ -111,3 +111,18 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 - 真机扫描、地址类型、MTU、UUID/CCCD 和 Notify：待串口设备可见后烧录验证
 
 详细设计和证据等级见 [BLE GATT 链路](ble-gatt-link.md)。
+
+## 阶段 07 验证
+
+- `idf.py build`：通过，认证代码实际链接 mbedTLS HKDF/HMAC，镜像 `0xee120`
+- 默认 1 MiB app 分区剩余 `0x11ee0`（约 7%），未修改分区表
+- 主机测试：5/5 通过，新增完整 MiOT 认证状态机测试
+- 覆盖：短重复初始化恢复、inline、multiframe、连续帧号、双向 HMAC 和成功结果
+- 覆盖：错误设备 HMAC、`0x23` 登录拒绝、异常帧号和失败会话清零
+- 随机数：固件使用 `esp_fill_random()`；主机测试使用固定合成向量
+- 清理：失败后尽力关闭四个 CCCD，断开并清除会话与队列
+- 重试：认证失败至少等待 3 秒，连续 5 次进入 `auth_failed_locked`
+- Secret：日志和 HTTP 只暴露认证阶段名，不暴露 Token、随机数、Key、IV 或 HMAC
+- 真机认证：当前环境未发现串口，尚未完成，不能标记为真机确认
+
+详细状态机见 [MiOT BLE 登录认证](miot-auth.md)。
