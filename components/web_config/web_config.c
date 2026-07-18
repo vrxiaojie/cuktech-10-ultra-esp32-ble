@@ -72,7 +72,8 @@ static const char MANAGEMENT_PAGE[] =
     "<p>默认 <code>cuktech/charger</code> 才能直接兼容未经修改的现有 HA 集成。</p>"
     "<div class='row'><label>Keepalive<input id='mk' type='number' min='1' max='65535'></label>"
     "<label class='check'><input id='be' type='checkbox'>启用 BLE</label></div>"
-    "<button>校验、保存并重启</button></form><p id='msg'></p><script>"
+    "<button>校验、保存并重启</button></form><button id='retry' type='button'>重新尝试 BLE 认证</button>"
+    "<p id='msg'></p><script>"
     "async function load(){let [s,c]=await Promise.all([fetch('/api/status').then(r=>r.json()),"
     "fetch('/api/config').then(r=>r.json())]);status.textContent='Wi-Fi: '+s.wifi_state+"
     "'；BLE: '+s.ble_state;mac.value=c.charger_mac;mh.value=c.mqtt_host;mp.value=c.mqtt_port;"
@@ -86,7 +87,9 @@ static const char MANAGEMENT_PAGE[] =
     "clear_mqtt_password:cm.checked,mqtt_topic_prefix:mt.value,mqtt_keepalive:Number(mk.value),"
     "ble_enabled:be.checked};let r=await fetch('/api/config',{method:'POST',headers:{"
     "'Content-Type':'application/json'},body:JSON.stringify(b)});let j=await r.json();"
-    "msg.textContent=j.ok?'保存成功，设备将在 3 秒后重启。':'失败：'+j.error;};load();"
+    "msg.textContent=j.ok?'保存成功，设备将在 3 秒后重启。':'失败：'+j.error;};"
+    "retry.onclick=async()=>{let r=await fetch('/api/retry-ble',{method:'POST'});"
+    "let j=await r.json();msg.textContent=j.ok?'已提交 BLE 认证重试，请稍候刷新状态。':'失败：'+j.error;};load();"
     "</script></body></html>";
 
 static esp_err_t set_security_headers(httpd_req_t *request)
@@ -488,6 +491,32 @@ static esp_err_t enable_post_handler(httpd_req_t *request)
     return send_json(request, "200 OK", response);
 }
 
+static esp_err_t retry_ble_post_handler(httpd_req_t *request)
+{
+    if (!management_allowed()) {
+        return send_json(request, "403 Forbidden",
+                         "{\"ok\":false,\"error\":\"sta_required\"}");
+    }
+    if (request->content_len != 0) {
+        return send_json(request, "400 Bad Request",
+                         "{\"ok\":false,\"error\":\"body_not_allowed\"}");
+    }
+    uint32_t request_id = 0U;
+    esp_err_t error = cuktech_ble_retry_auth(&request_id);
+    if (error == ESP_ERR_INVALID_STATE) {
+        return send_json(request, "409 Conflict",
+                         "{\"ok\":false,\"error\":\"ble_not_auth_locked\"}");
+    }
+    if (error != ESP_OK) {
+        return send_json(request, "503 Service Unavailable",
+                         "{\"ok\":false,\"error\":\"ble_retry_unavailable\"}");
+    }
+    char response[64];
+    snprintf(response, sizeof(response),
+             "{\"ok\":true,\"request_id\":%" PRIu32 "}", request_id);
+    return send_json(request, "200 OK", response);
+}
+
 static esp_err_t captive_redirect_handler(httpd_req_t *request)
 {
     httpd_resp_set_status(request, "302 Found");
@@ -502,7 +531,7 @@ esp_err_t web_config_start(void)
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = 6144;
-    config.max_uri_handlers = 9;
+    config.max_uri_handlers = 10;
     config.recv_wait_timeout = CONFIG_CUKTECH_WIFI_VERIFY_SECONDS + 5;
     config.send_wait_timeout = 10;
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &config), TAG, "HTTP server start failed");
@@ -523,6 +552,10 @@ esp_err_t web_config_start(void)
         .uri = "/api/config", .method = HTTP_POST, .handler = config_post_handler};
     const httpd_uri_t enable_post = {
         .uri = "/api/enable", .method = HTTP_POST, .handler = enable_post_handler};
+    const httpd_uri_t retry_ble_post = {
+        .uri = "/api/retry-ble",
+        .method = HTTP_POST,
+        .handler = retry_ble_post_handler};
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &root), TAG,
                         "register root failed");
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &provision), TAG,
@@ -539,6 +572,8 @@ esp_err_t web_config_start(void)
                         "register config POST failed");
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &enable_post), TAG,
                         "register enable POST failed");
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &retry_ble_post),
+                        TAG, "register retry BLE POST failed");
     ESP_LOGI(TAG, "HTTP configuration server started");
     return ESP_OK;
 }

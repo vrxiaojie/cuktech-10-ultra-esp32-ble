@@ -8,3 +8,6 @@ void cuktech_ble_mac_to_nimble(const uint8_t display_order[6],
                                uint8_t nimble_order[6]);
 uint32_t cuktech_ble_next_backoff(uint32_t current_seconds,
                                   uint32_t maximum_seconds);
+uint32_t cuktech_ble_next_request_id(uint32_t current_id);
+bool cuktech_ble_failure_limit_reached(uint32_t consecutive_failures,
+                                       uint32_t limit);

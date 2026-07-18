@@ -113,6 +113,7 @@ typedef struct {
 typedef enum {
     BLE_REQUEST_CONTROL = 0,
     BLE_REQUEST_ENABLE,
+    BLE_REQUEST_RETRY_AUTH,
 } ble_request_type_t;
 
 typedef struct {
@@ -188,6 +189,7 @@ static uint8_t s_own_address_type;
 static uint16_t s_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static volatile bool s_control_overflow;
 static uint32_t s_next_request_id;
+static bool s_auth_retry_requested;
 static bool s_started;
 
 static void notify_ble_task(void);
@@ -347,10 +349,7 @@ static bool ble_runtime_enabled(void)
 static uint32_t allocate_request_id(void)
 {
     portENTER_CRITICAL(&s_lock);
-    ++s_next_request_id;
-    if (s_next_request_id == 0U) {
-        ++s_next_request_id;
-    }
+    s_next_request_id = cuktech_ble_next_request_id(s_next_request_id);
     uint32_t request_id = s_next_request_id;
     portEXIT_CRITICAL(&s_lock);
     return request_id;
@@ -404,6 +403,23 @@ esp_err_t cuktech_ble_set_enabled(bool enabled, uint32_t *request_id)
         .type = BLE_REQUEST_ENABLE,
         .request_id = allocate_request_id(),
         .data.enabled = enabled,
+    };
+    return enqueue_request(&request, request_id);
+}
+
+esp_err_t cuktech_ble_retry_auth(uint32_t *request_id)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool retry_available =
+        s_status.enabled &&
+        s_status.state == CUKTECH_BLE_STATE_AUTH_FAILED_LOCKED;
+    portEXIT_CRITICAL(&s_lock);
+    if (!retry_available) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    ble_request_t request = {
+        .type = BLE_REQUEST_RETRY_AUTH,
+        .request_id = allocate_request_id(),
     };
     return enqueue_request(&request, request_id);
 }
@@ -1141,7 +1157,8 @@ static bool send_get_setting(uint16_t piid, uint32_t *decrypt_failures,
         status = receive_and_process_plaintext(
             plaintext, sizeof(plaintext), &plaintext_len, remaining,
             decrypt_failures);
-        if (*decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT ||
+        if (cuktech_ble_failure_limit_reached(
+                *decrypt_failures, BLE_DECRYPT_FAILURE_LIMIT) ||
             status == CUKTECH_COMMAND_DISCONNECTED) {
             *session_stale = true;
             return false;
@@ -1286,6 +1303,11 @@ static bool process_authenticated_requests(uint32_t *decrypt_failures,
             }
             continue;
         }
+        if (request.type == BLE_REQUEST_RETRY_AUTH) {
+            record_request_result(request.request_id, false,
+                                  "already_authenticated");
+            continue;
+        }
         if (!ble_runtime_enabled()) {
             record_request_result(request.request_id, false, "disabled");
             continue;
@@ -1311,6 +1333,13 @@ static bool process_pre_session_requests(void)
             s_status.enabled = request.data.enabled;
             portEXIT_CRITICAL(&s_lock);
             record_request_result(request.request_id, true, NULL);
+        } else if (request.type == BLE_REQUEST_RETRY_AUTH) {
+            if (ble_runtime_enabled()) {
+                s_auth_retry_requested = true;
+                record_request_result(request.request_id, true, NULL);
+            } else {
+                record_request_result(request.request_id, false, "disabled");
+            }
         } else {
             record_request_result(request.request_id, false,
                                   "not_authenticated");
@@ -1379,7 +1408,8 @@ static bool drain_initial_pushes(uint32_t *decrypt_failures)
             break;
         }
         if (status == CUKTECH_COMMAND_DISCONNECTED ||
-            *decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT) {
+            cuktech_ble_failure_limit_reached(
+                *decrypt_failures, BLE_DECRYPT_FAILURE_LIMIT)) {
             return false;
         }
         if (status == CUKTECH_COMMAND_OK) {
@@ -1403,7 +1433,8 @@ static bool run_authenticated_session(void)
             update_status(CUKTECH_BLE_STATE_ERROR,
                           s_conn_handle != BLE_HS_CONN_HANDLE_NONE, true, 0U,
                           0U,
-                          decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT
+                          cuktech_ble_failure_limit_reached(
+                              decrypt_failures, BLE_DECRYPT_FAILURE_LIMIT)
                               ? "session_stale_decrypt"
                               : "command_channel_failed");
         }
@@ -1426,7 +1457,8 @@ static bool run_authenticated_session(void)
             (void)process_miot_plaintext(plaintext, plaintext_len);
         } else if (status == CUKTECH_COMMAND_DISCONNECTED) {
             return false;
-        } else if (decrypt_failures >= BLE_DECRYPT_FAILURE_LIMIT) {
+        } else if (cuktech_ble_failure_limit_reached(
+                       decrypt_failures, BLE_DECRYPT_FAILURE_LIMIT)) {
             update_status(CUKTECH_BLE_STATE_ERROR, true, true, 0U, 0U,
                           "session_stale_decrypt");
             return false;
@@ -2174,7 +2206,10 @@ static void ble_application_task(void *argument)
                     ++authentication_failures;
                 }
                 disconnect_cleanly();
-                if (authentication_failures >= BLE_AUTH_FAILURE_LOCK_COUNT) {
+                if (cuktech_ble_failure_limit_reached(
+                        authentication_failures,
+                        BLE_AUTH_FAILURE_LOCK_COUNT)) {
+                    s_auth_retry_requested = false;
                     update_status(CUKTECH_BLE_STATE_AUTH_FAILED_LOCKED, false,
                                   false, 0U, 0U, NULL);
                     update_authentication_status(false,
@@ -2184,12 +2219,20 @@ static void ble_application_task(void *argument)
                              "MiOT authentication locked after %" PRIu32
                              " consecutive failures; reboot or manual retry required",
                              authentication_failures);
-                    while (ble_runtime_enabled()) {
+                    while (ble_runtime_enabled() &&
+                           !s_auth_retry_requested) {
                         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000U));
                         (void)process_pre_session_requests();
                     }
+                    bool manual_retry = s_auth_retry_requested;
+                    s_auth_retry_requested = false;
                     authentication_failures = 0U;
                     backoff = 0U;
+                    update_authentication_status(false, 0U, "");
+                    if (manual_retry && ble_runtime_enabled()) {
+                        ESP_LOGI(TAG,
+                                 "manual MiOT authentication retry accepted");
+                    }
                     continue;
                 }
             }
@@ -2226,6 +2269,8 @@ esp_err_t cuktech_ble_start(const app_config_t *config)
         return ESP_ERR_INVALID_STATE;
     }
     memset(&s_status, 0, sizeof(s_status));
+    s_next_request_id = 0U;
+    s_auth_retry_requested = false;
     s_status.enabled = config->ble_enabled;
     uint8_t display_order[6];
     if (!config->token_configured ||
