@@ -33,13 +33,15 @@ ESP-IDF 版本必须为 5.5.2 或更高版本。生成的 `sdkconfig` 仅属于�
 - 生成 SHA-256 校验文件，同时上传 Actions artifact；
 - 创建 `v<版本号>` 标签和 GitHub Release，并附加全部固件文件。
 
-发布页中的 `cuktech_ble_gateway-<版本>-merged.bin` 是推荐下载项，可使用 esptool 从地址 `0x0` 烧录。烧录会改写设备 Flash，操作前应确认目标串口和设备型号：
+发布页中的 `cuktech_ble_gateway-<版本>-merged.bin` 适合首次完整烧录，从地址 `0x0` 写入。该文件覆盖的范围包含 NVS，使用后需要重新配置 Wi-Fi、充电器和 MQTT：
 
 ```bash
 esptool.py --chip esp32c3 -p "$PORT" write_flash 0x0 cuktech_ble_gateway-1.0.0-merged.bin
 ```
 
-应用、Bootloader 和分区表的独立 `.bin` 主要用于调试和按分区烧录，不能都从 `0x0` 写入。
+需要保留 NVS 配置时，应使用三个独立 `.bin`，地址依次为 Bootloader `0x0`、分区表 `0x8000`、应用程序 `0x10000`，并且不要执行整片擦除。也可以在分区布局未变化时只把应用程序写入 `0x10000`。三个文件不能都从 `0x0` 写入，也不能与合并固件同时烧录。
+
+Windows 用户可使用乐鑫 [Flash Download Tool](https://docs.espressif.com/projects/esp-test-tools/zh_CN/latest/esp32/production_stage/tools/flash_download_tool.html)。图形界面的选项、合并固件配置、分立固件地址、esptool 命令和 NVS 数据影响见 [Release 固件烧录说明](docs/flash-download-tool.md)。
 
 ## 烧录与日志
 
@@ -63,6 +65,7 @@ WSL USB 转发、完整部署顺序和发布检查见 [部署与烧录](docs/dep
 ## 文档导航
 
 - [部署与烧录](docs/deployment.md)
+- [Release 固件烧录说明](docs/flash-download-tool.md)
 - [Home Assistant 接入](docs/home-assistant.md)
 - [HTTP API](docs/http-api.md)
 - [MQTT 契约](docs/mqtt-bridge.md)

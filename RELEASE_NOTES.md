@@ -32,4 +32,4 @@
 
 ### 升级提示
 
-同一分区布局可直接重新烧录并保留 NVS。任何未来 schema 或分区变更必须提供迁移、回滚和数据影响说明。完整操作和真机步骤见 [部署与烧录](docs/deployment.md)。
+同一分区布局下，使用分立固件或 `idf.py flash` 可保留 NVS。Release 的合并固件从 `0x0` 写入时会覆盖 NVS，需要重新配置 Wi-Fi、充电器和 MQTT。任何未来 schema 或分区变更必须提供迁移、回滚和数据影响说明。完整操作见 [Release 固件烧录说明](docs/flash-download-tool.md) 和 [部署与烧录](docs/deployment.md)。
