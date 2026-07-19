@@ -1,0 +1,92 @@
+name: Release ESP32-C3 firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without the v prefix, for example 1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: firmware-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish firmware
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_REF_NAME" != "main" ]]; then
+            echo "Releases must be dispatched from the main branch."
+            exit 1
+          fi
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must use the MAJOR.MINOR.PATCH format without a v prefix."
+            exit 1
+          fi
+          if gh release view "v${RELEASE_VERSION}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release v${RELEASE_VERSION} already exists."
+            exit 1
+          fi
+
+      - name: Build ESP32-C3 firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.2
+          target: esp32c3
+          path: .
+          command: idf.py -D PROJECT_VER=${{ inputs.version }} build
+
+      - name: Create merged flash image
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.2
+          target: esp32c3
+          path: .
+          command: idf.py merge-bin -o build/cuktech_ble_gateway-${{ inputs.version }}-merged.bin
+
+      - name: Prepare release files
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p release-assets
+          cp "build/cuktech_ble_gateway-${RELEASE_VERSION}-merged.bin" \
+            "release-assets/cuktech_ble_gateway-${RELEASE_VERSION}-merged.bin"
+          cp build/cuktech_ble_gateway.bin \
+            "release-assets/cuktech_ble_gateway-${RELEASE_VERSION}-app.bin"
+          cp build/bootloader/bootloader.bin \
+            "release-assets/cuktech_ble_gateway-${RELEASE_VERSION}-bootloader.bin"
+          cp build/partition_table/partition-table.bin \
+            "release-assets/cuktech_ble_gateway-${RELEASE_VERSION}-partition-table.bin"
+          cd release-assets
+          sha256sum ./*.bin > SHA256SUMS
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cuktech-ble-gateway-${{ inputs.version }}-esp32c3
+          path: release-assets/
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "v${RELEASE_VERSION}" release-assets/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "CUKTECH BLE Gateway ${RELEASE_VERSION}" \
+            --notes-file RELEASE_NOTES.md
