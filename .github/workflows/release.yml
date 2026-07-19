@@ -55,7 +55,7 @@ jobs:
           esp_idf_version: v5.5.2
           target: esp32c3
           path: .
-          command: idf.py merge-bin -o build/cuktech_ble_gateway-${{ inputs.version }}-merged.bin
+          command: idf.py merge-bin -o cuktech_ble_gateway-${{ inputs.version }}-merged.bin
 
       - name: Prepare release files
         env:
