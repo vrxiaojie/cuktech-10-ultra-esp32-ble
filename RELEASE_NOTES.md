@@ -1,6 +1,6 @@
 # 发布说明
 
-## 第一阶段候选版本
+## 1.0.0
 
 本版本面向无 PSRAM 的 ESP32-C3 和 ESP-IDF 5.5.2 或更高版本，实现单台酷态科 10 号超级电能充 Ultra 的本地 BLE→MQTT/Home Assistant 网关。
 

@@ -24,6 +24,23 @@ ctest --test-dir /tmp/cuktech-host-tests --output-on-failure
 
 ESP-IDF 版本必须为 5.5.2 或更高版本。生成的 `sdkconfig` 仅属于本机环境，跨环境默认配置以版本控制中的 `sdkconfig.defaults` 为准。
 
+## 发布固件
+
+仓库的 `Release ESP32-C3 firmware` 工作流用于正式发布。维护者从 `main` 分支手动运行该工作流并输入不带 `v` 前缀的版本号，例如 `1.0.0`。工作流会：
+
+- 使用 ESP-IDF 5.5.2 构建 `esp32c3` 固件，并把版本号写入应用描述；
+- 生成从 Flash 地址 `0x0` 烧录的合并固件，以及应用、Bootloader 和分区表的独立固件；
+- 生成 SHA-256 校验文件，同时上传 Actions artifact；
+- 创建 `v<版本号>` 标签和 GitHub Release，并附加全部固件文件。
+
+发布页中的 `cuktech_ble_gateway-<版本>-merged.bin` 是推荐下载项，可使用 esptool 从地址 `0x0` 烧录。烧录会改写设备 Flash，操作前应确认目标串口和设备型号：
+
+```bash
+esptool.py --chip esp32c3 -p "$PORT" write_flash 0x0 cuktech_ble_gateway-1.0.0-merged.bin
+```
+
+应用、Bootloader 和分区表的独立 `.bin` 主要用于调试和按分区烧录，不能都从 `0x0` 写入。
+
 ## 烧录与日志
 
 先根据实际设备确认串口，再执行：
