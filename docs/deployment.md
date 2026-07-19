@@ -45,7 +45,9 @@ idf.py size
 
 ## 烧录并单独查看日志
 
-把检测到的实际串口赋给 `PORT`：
+从 GitHub Release 下载 `.bin` 文件时，可以使用 Windows Flash Download Tool 或 esptool。合并固件从 `0x0` 烧录，但会覆盖 NVS 配置；需要保留配置时，应按 `0x0`、`0x8000`、`0x10000` 分别烧录 Bootloader、分区表和应用程序。完整界面配置和命令见 [Release 固件烧录说明](flash-download-tool.md)。
+
+从本仓库源码构建时，把检测到的实际串口赋给 `PORT`：
 
 ```bash
 PORT=/dev/ttyACM0
@@ -95,4 +97,4 @@ mosquitto_pub -h <BROKER> -t cuktech/charger/set \
 
 ## 升级
 
-同一分区布局下可重新执行 build、flash、monitor。配置 schema 当前为 v1，并支持从 v0 显式迁移；未知 schema 或 CRC 损坏会回退内存默认值而不自动擦除 NVS。任何未来分区表变化都必须先评估回滚和配置数据影响。
+同一分区布局下可重新执行 build、flash、monitor。分立写入或普通 `idf.py flash` 不会主动覆盖 NVS；从 `0x0` 写入 Release 的合并固件会覆盖 NVS 所在范围并清除配置。配置 schema 当前为 v1，并支持从 v0 显式迁移；未知 schema 或 CRC 损坏会回退内存默认值而不自动擦除 NVS。任何未来分区表变化都必须先评估回滚和配置数据影响。

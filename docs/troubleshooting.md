@@ -18,6 +18,15 @@
 - 确认目标为 `esp32c3`，并检查 USB 权限和串口是否被 monitor 占用。
 - 降低波特率可帮助诊断不稳定 USB 链路：`idf.py -p "$PORT" -b 115200 flash`。
 - 不要用 `erase-flash` 作为普通连接错误的第一反应；它会清除 NVS 配置。
+- 使用 Flash Download Tool 时，`ChipType` 必须选择 `ESP32-C3`，`LoadMode` 选择 `UART`，并关闭占用同一 COM 端口的串口软件。
+
+## Release 固件地址配置错误
+
+- 合并固件 `cuktech_ble_gateway-<版本>-merged.bin` 只配置一行，地址为 `0x0`。
+- 分立固件地址为 Bootloader `0x0`、分区表 `0x8000`、应用程序 `0x10000`。
+- 不要同时勾选合并固件和分立固件，也不要把三个分立固件都写入 `0x0`。
+- 使用合并固件或点击 Flash Download Tool 的 `ERASE` 会清除 NVS；需要保留配置时按分立地址烧录且不要整片擦除。
+- 详细操作见 [Release 固件烧录说明](flash-download-tool.md)。
 
 ## 找不到配网 AP
 
