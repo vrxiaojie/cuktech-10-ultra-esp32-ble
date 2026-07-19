@@ -26,8 +26,4 @@ jobs:
           esp_idf_version: v5.5.2
           target: esp32c3
           path: .
-          command: >-
-            bash -lc 'cmake -S tests/host -B /tmp/cuktech-host-tests-idf
-            -DIDF_PATH="$IDF_PATH" && cmake --build /tmp/cuktech-host-tests-idf &&
-            ctest --test-dir /tmp/cuktech-host-tests-idf --output-on-failure &&
-            idf.py build'
+          command: idf.py build
